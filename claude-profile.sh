@@ -312,13 +312,21 @@ _cp_write_update_cache() {
     return 0
 }
 
-# Rate-limited (at most once per _CP_UPDATE_INTERVAL) stderr diagnostic for
-# persistent local cache-file I/O failures (permissions, disk full) --
-# distinct from transient network failures, which stay silent by design
-# per _cp_update_check. Best-effort: uses a separate marker file so a
-# broken .update-check write doesn't also block this diagnostic; if even
-# the marker can't be written, this degrades to printing every invocation
-# rather than staying silent forever (never worse than the bug being fixed).
+# Rate-limited stderr diagnostic for persistent local cache-file I/O
+# failures (permissions, disk full) -- distinct from transient network
+# failures, which stay silent by design per _cp_update_check. Best-effort:
+# uses a separate marker file so a broken .update-check write doesn't also
+# block this diagnostic; if even the marker can't be written, this
+# degrades to printing every invocation rather than staying silent forever
+# (never worse than the bug being fixed).
+#
+# Deliberately reuses _CP_UPDATE_INTERVAL (default 86400s) as a rolling
+# window approximating the design's "at most once per calendar day" --
+# not a literal calendar-day boundary, and coupled to the same
+# user-tunable CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs
+# the update check's own polling frequency. Lowering that interval (e.g.
+# for testing) also shortens this diagnostic's rate limit; this is an
+# accepted simplification, not a separate config knob.
 _cp_warn_cache_write_failure() {
     _cp_wcf_dir="$(_cp_install_dir)"
     _cp_wcf_marker="${_cp_wcf_dir}/.update-check-diag"
