@@ -7,12 +7,186 @@
 #   claude           — runs Claude Code with the active/default profile
 #   claude-profile   — manage profiles (create, list, delete, default, use, which)
 
+# --- Version tracking helpers ---
+
+function Get-CPInstallDir {
+    if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+        return Join-Path $env:LOCALAPPDATA 'claude-profile'
+    }
+    if ($env:XDG_DATA_HOME) {
+        return Join-Path $env:XDG_DATA_HOME 'claude-profile'
+    }
+    return Join-Path $HOME '.local' 'share' 'claude-profile'
+}
+
+function Get-CPInstalledVersion {
+    $versionFile = Join-Path (Get-CPInstallDir) 'VERSION'
+    if (Test-Path $versionFile) {
+        $raw = Get-Content $versionFile -Raw -ErrorAction SilentlyContinue
+        if ($raw) {
+            $v = $raw.Trim()
+            if ($v) { return $v }
+        }
+    }
+    return 'unknown'
+}
+
+# Numeric MAJOR.MINOR.PATCH comparison. "unknown" is always less than any
+# real version, and equal to itself.
+function Test-CPVersionLessThan {
+    param([string]$A, [string]$B)
+    if ($A -eq 'unknown') { return ($B -ne 'unknown') }
+    if ($B -eq 'unknown') { return $false }
+    try {
+        return ([version]$A) -lt ([version]$B)
+    } catch {
+        return $false
+    }
+}
+
+# --- Passive update check ---
+
+$Script:CPRepoApi = if ($env:CLAUDE_PROFILE_UPDATE_API_BASE) { $env:CLAUDE_PROFILE_UPDATE_API_BASE } else { 'https://api.github.com/repos/pegasusheavy/claude-code-profiles' }
+$Script:CPAssetBase = if ($env:CLAUDE_PROFILE_UPDATE_ASSET_BASE) { $env:CLAUDE_PROFILE_UPDATE_ASSET_BASE } else { 'https://github.com/pegasusheavy/claude-code-profiles/releases/download' }
+
+function Test-CPChecksum {
+    param([string]$FilePath, [string]$SumsPath)
+    $name = Split-Path $FilePath -Leaf
+    $line = (Get-Content $SumsPath -ErrorAction SilentlyContinue) | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
+    if (-not $line) { return $false }
+    $expected = ($line -split '\s+')[0]
+    $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash
+    return ($expected.ToLower() -eq $actual.ToLower())
+}
+
+$Script:CPUpdateInterval = 86400
+if ($env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL) {
+    try { $Script:CPUpdateInterval = [long]$env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL }
+    catch { }
+}
+
+function Get-CPTagVersion {
+    param([string]$Json)
+    if ($Json -notmatch '"tag_name"\s*:\s*"([^"]*)"') { return $null }
+    $tag = $Matches[1].TrimStart('v')
+    if ($tag -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { return $null }
+    return $tag
+}
+
+function Read-CPUpdateCache {
+    $cacheFile = Join-Path (Get-CPInstallDir) '.update-check'
+    $result = [ordered]@{ Timestamp = [long]0; Version = 'unknown'; Notified = 0 }
+    if (-not (Test-Path $cacheFile)) { return $result }
+    $lines = @(Get-Content $cacheFile -ErrorAction SilentlyContinue)
+    if ($lines.Count -ge 1 -and $lines[0] -match '^\d+$') { $result.Timestamp = [long]$lines[0] }
+    if ($lines.Count -ge 2 -and $lines[1]) { $result.Version = $lines[1] }
+    if ($lines.Count -ge 3 -and ($lines[2] -eq '0' -or $lines[2] -eq '1')) { $result.Notified = [int]$lines[2] }
+    return $result
+}
+
+# Rate-limited stderr diagnostic for persistent local cache-file I/O
+# failures (permissions, disk full) -- distinct from transient network
+# failures, which stay silent by design in Invoke-CPUpdateCheck.
+# Best-effort: uses a separate marker file so a broken .update-check
+# write doesn't also block this diagnostic; if even the marker can't be
+# written, this degrades to printing every invocation rather than
+# staying silent forever (never worse than the bug being fixed).
+#
+# Deliberately reuses $Script:CPUpdateInterval (default 86400s) as a
+# rolling window approximating "at most once per calendar day" -- not a
+# literal calendar-day boundary, and coupled to the same user-tunable
+# CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs the update
+# check's own polling frequency. This is an accepted simplification, not
+# a separate config knob (matches the sh implementation's tradeoff).
+#
+# Called from inside Write-CPUpdateCache (not from its callers) so the
+# already-resolved install dir and timestamp are reused rather than
+# re-resolved -- this also means every current and future caller of
+# Write-CPUpdateCache gets this diagnostic for free, with no risk of a
+# call site forgetting to check the write's return value.
+function Write-CPCacheFailureDiagnostic {
+    param([string]$InstallDir, [long]$Now)
+    $marker = Join-Path $InstallDir '.update-check-diag'
+    $last = [long]0
+    if (Test-Path $marker) {
+        $raw = Get-Content $marker -Raw -ErrorAction SilentlyContinue
+        if ($raw -and ($raw.Trim() -match '^\d+$')) { $last = [long]$raw.Trim() }
+    }
+    if (($Now - $last) -ge $Script:CPUpdateInterval) {
+        $host.UI.WriteErrorLine("claude-profile: warning: could not write update-check cache in $InstallDir -- update notifications may not work until this is fixed")
+        $tmpMarker = "$marker.tmp.$PID"
+        try {
+            Set-Content -Path $tmpMarker -Value "$Now" -ErrorAction Stop
+            Move-Item -Path $tmpMarker -Destination $marker -Force -ErrorAction Stop
+        } catch {
+            Remove-Item -Path $tmpMarker -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Atomic write: temp file + Move-Item, so a crash mid-write can't corrupt
+# the cache that every claude() invocation reads.
+function Write-CPUpdateCache {
+    param([long]$Timestamp, [string]$Version, [int]$Notified)
+    $installDir = Get-CPInstallDir
+    New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $cacheFile = Join-Path $installDir '.update-check'
+    $tmpFile = "$cacheFile.tmp.$PID"
+    try {
+        Set-Content -Path $tmpFile -Value "$Timestamp`n$Version`n$Notified" -ErrorAction Stop
+        Move-Item -Path $tmpFile -Destination $cacheFile -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Write-CPCacheFailureDiagnostic -InstallDir $installDir -Now $Timestamp
+        return $false
+    }
+}
+
+function Invoke-CPUpdateCheck {
+    try {
+        if ($env:CLAUDE_PROFILE_NO_UPDATE_CHECK) { return }
+        $cache = Read-CPUpdateCache
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+        if (($now - $cache.Timestamp) -ge $Script:CPUpdateInterval) {
+            $newVer = $cache.Version
+            try {
+                $resp = Invoke-RestMethod -Uri "$($Script:CPRepoApi)/releases/latest" -TimeoutSec 3 -ErrorAction Stop
+                $extracted = Get-CPTagVersion -Json ($resp | ConvertTo-Json -Compress)
+                if ($extracted) { $newVer = $extracted }
+            } catch {
+                # network/API failure: silently keep the previous cached version
+            }
+            if ($newVer -ne $cache.Version) {
+                Write-CPUpdateCache -Timestamp $now -Version $newVer -Notified 0 | Out-Null
+                $cache.Version = $newVer
+                $cache.Notified = 0
+            } else {
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified $cache.Notified | Out-Null
+            }
+        }
+
+        if ($cache.Notified -eq 0 -and $cache.Version -ne 'unknown') {
+            $installed = Get-CPInstalledVersion
+            if (Test-CPVersionLessThan -A $installed -B $cache.Version) {
+                $installedDisplay = if ($installed -eq 'unknown') { 'unknown' } else { "v$installed" }
+                $host.UI.WriteErrorLine("A new claude-profile version is available ($installedDisplay -> v$($cache.Version)). Run 'claude-profile update' to upgrade.")
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified 1 | Out-Null
+            }
+        }
+    } catch {
+        # Never let the update check break claude() startup.
+    }
+}
+
 # --- claude wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
 # it passes through without overriding.
 
 function claude {
+    Invoke-CPUpdateCheck
     if (-not $env:CLAUDE_CONFIG_DIR) {
         if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
             $DataDir = Join-Path $env:LOCALAPPDATA 'claude-profiles'
@@ -272,6 +446,87 @@ function claude-profile {
             }
         }
 
+        'version' {
+            Write-Host (Get-CPInstalledVersion)
+        }
+
+        'update' {
+            $Force = $args -contains '--force'
+
+            try {
+                $resp = Invoke-RestMethod -Uri "$($Script:CPRepoApi)/releases/latest" -TimeoutSec 10 -ErrorAction Stop
+            } catch {
+                _cp_die 'update failed: could not reach GitHub'
+                return
+            }
+            $latest = Get-CPTagVersion -Json ($resp | ConvertTo-Json -Compress)
+            if (-not $latest) {
+                _cp_die 'update failed: could not determine latest version'
+                return
+            }
+            $tag = "v$latest"
+
+            $installed = Get-CPInstalledVersion
+            if (-not $Force -and $installed -ne 'unknown' -and -not (Test-CPVersionLessThan -A $installed -B $latest)) {
+                _cp_die "already up to date (v$installed); latest is v$latest"
+                return
+            }
+
+            $installDir = Get-CPInstallDir
+            New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
+            # Temp dir is created INSIDE $installDir (not $env:TEMP) so the
+            # final Move-Item below is guaranteed to be a same-volume,
+            # atomic rename rather than a possible cross-volume copy+delete.
+            $tmpDir = Join-Path $installDir ".update-$PID"
+            try {
+                New-Item -ItemType Directory -Path $tmpDir -Force -ErrorAction Stop | Out-Null
+            } catch {
+                _cp_die "update failed: could not create temp directory: $_"
+                return
+            }
+            try {
+                $assetBase = "$($Script:CPAssetBase)/$tag"
+                try {
+                    Invoke-WebRequest -Uri "$assetBase/SHA256SUMS" -OutFile (Join-Path $tmpDir 'SHA256SUMS') -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$assetBase/VERSION" -OutFile (Join-Path $tmpDir 'VERSION') -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$assetBase/claude-profile-init.ps1" -OutFile (Join-Path $tmpDir 'claude-profile-init.ps1') -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+                } catch {
+                    _cp_die "update failed: download error: $_"
+                    return
+                }
+
+                $sumsFile = Join-Path $tmpDir 'SHA256SUMS'
+                if (-not (Test-CPChecksum -FilePath (Join-Path $tmpDir 'VERSION') -SumsPath $sumsFile)) {
+                    _cp_die 'update failed: VERSION checksum mismatch'
+                    return
+                }
+                if (-not (Test-CPChecksum -FilePath (Join-Path $tmpDir 'claude-profile-init.ps1') -SumsPath $sumsFile)) {
+                    _cp_die 'update failed: claude-profile-init.ps1 checksum mismatch'
+                    return
+                }
+
+                $downloadedVersion = (Get-Content (Join-Path $tmpDir 'VERSION') -Raw).Trim()
+                if ($downloadedVersion -ne $latest) {
+                    _cp_die "update failed: downloaded VERSION ($downloadedVersion) does not match release tag ($latest)"
+                    return
+                }
+
+                try {
+                    Move-Item -Path (Join-Path $tmpDir 'claude-profile-init.ps1') -Destination (Join-Path $installDir 'claude-profile-init.ps1') -Force -ErrorAction Stop
+                    Move-Item -Path (Join-Path $tmpDir 'VERSION') -Destination (Join-Path $installDir 'VERSION') -Force -ErrorAction Stop
+                } catch {
+                    _cp_die "update failed: could not replace installed files: $_"
+                    return
+                }
+
+                $installedDisplay = if ($installed -eq 'unknown') { 'unknown' } else { "v$installed" }
+                Write-Host "Updating claude-profile-init.ps1: $installedDisplay -> v$latest"
+                Write-Host "Done. Run '. `$PROFILE' (or restart PowerShell) to use the new version."
+            } finally {
+                Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
         { $_ -eq 'help' -or $_ -eq '-h' -or $_ -eq '--help' } {
             Write-Host @"
 Usage: claude-profile [command] [args...]
@@ -283,6 +538,8 @@ Commands:
     list, ls                List all profiles
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
+    version                 Show the installed version
+    update [--force]        Update to the latest release
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 

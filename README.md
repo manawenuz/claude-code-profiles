@@ -47,6 +47,8 @@ claude -p "explain this code"
 | `claude-profile default [name]` | Get or set the default profile |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile which [name]` | Show the config directory path |
+| `claude-profile version` | Show the installed version |
+| `claude-profile update [--force]` | Update to the latest release |
 | `claude-profile help` | Show help |
 
 ## How It Works
@@ -87,6 +89,46 @@ Each profile directory is a complete Claude Code config directory. After creatin
 ### Profile Names
 
 Profile names can contain letters, digits, hyphens, and underscores. Examples: `work`, `personal`, `client-acme`, `side_project`.
+
+## Updating
+
+`claude-profile` checks for new releases at most once every 24 hours, as a
+side effect of running `claude` (or, on cmd.exe, any `claude-profile`
+command). If a newer version is available, you'll see a one-time notice:
+
+```
+A new claude-profile version is available (v1.0.0 -> v1.1.0). Run 'claude-profile update' to upgrade.
+```
+
+Run the update:
+
+```sh
+claude-profile update
+```
+
+This downloads the new script and the shared `VERSION` file from the
+matching GitHub Release (not the `main` branch), verifies their SHA-256
+checksums, and only replaces your installed files once both checks pass. It
+refuses to downgrade unless you pass `--force`. After updating, restart your
+shell (or `source ~/.bashrc` / `. $PROFILE`) to pick up the new version —
+cmd.exe re-reads the file on every `call`, so no restart is needed there.
+
+To disable the passive check entirely, set:
+
+```sh
+export CLAUDE_PROFILE_NO_UPDATE_CHECK=1
+```
+
+If the update-check cache itself can't be written (permissions, a full
+disk), you'll see a similar one-time-per-day warning instead:
+
+```
+claude-profile: warning: could not write update-check cache in ~/.local/share/claude-profile -- update notifications may not work until this is fixed
+```
+
+This doesn't block `claude` from running — it's just letting you know
+update notifications may be unreliable until the underlying issue is
+fixed.
 
 ## Platform Support
 

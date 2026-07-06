@@ -69,12 +69,353 @@ _cp_validate_name() {
     esac
 }
 
+# --- Version tracking helpers ---
+
+# Resolves the tool's own install directory (singular "claude-profile",
+# distinct from the plural "claude-profiles" data directory). Mirrors
+# _cp_data_dir's MSYS handling.
+_cp_install_dir() {
+    if _cp_is_msys && [ -n "${LOCALAPPDATA:-}" ] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "${LOCALAPPDATA}/claude-profile"
+        return 0
+    fi
+    printf '%s\n' "${XDG_DATA_HOME:-${HOME}/.local/share}/claude-profile"
+}
+
+# Reads the installed VERSION file; prints "unknown" if missing/empty.
+_cp_installed_version() {
+    _cp_ver_file="$(_cp_install_dir)/VERSION"
+    if [ -f "$_cp_ver_file" ]; then
+        _cp_ver=$(cat "$_cp_ver_file")
+        if [ -n "$_cp_ver" ]; then
+            printf '%s\n' "$_cp_ver"
+            return 0
+        fi
+    fi
+    printf 'unknown\n'
+}
+
+# Numeric MAJOR.MINOR.PATCH comparison. Usage: _cp_version_lt A B
+# Returns 0 (true, shell success) if A < B, 1 (false) otherwise.
+# "unknown" is always considered less than any real version, and equal to
+# itself.
+_cp_version_lt() {
+    _cp_vlt_a="$1"
+    _cp_vlt_b="$2"
+    if [ "$_cp_vlt_a" = "unknown" ]; then
+        [ "$_cp_vlt_b" = "unknown" ] && return 1
+        return 0
+    fi
+    [ "$_cp_vlt_b" = "unknown" ] && return 1
+    _cp_vlt_a1=$(printf '%s' "$_cp_vlt_a" | cut -d. -f1)
+    _cp_vlt_a2=$(printf '%s' "$_cp_vlt_a" | cut -d. -f2)
+    _cp_vlt_a3=$(printf '%s' "$_cp_vlt_a" | cut -d. -f3)
+    _cp_vlt_b1=$(printf '%s' "$_cp_vlt_b" | cut -d. -f1)
+    _cp_vlt_b2=$(printf '%s' "$_cp_vlt_b" | cut -d. -f2)
+    _cp_vlt_b3=$(printf '%s' "$_cp_vlt_b" | cut -d. -f3)
+    _cp_vlt_a1=${_cp_vlt_a1:-0}; _cp_vlt_a2=${_cp_vlt_a2:-0}; _cp_vlt_a3=${_cp_vlt_a3:-0}
+    _cp_vlt_b1=${_cp_vlt_b1:-0}; _cp_vlt_b2=${_cp_vlt_b2:-0}; _cp_vlt_b3=${_cp_vlt_b3:-0}
+    case "$_cp_vlt_a1" in ''|*[!0-9]*) _cp_vlt_a1=0 ;; esac
+    case "$_cp_vlt_a2" in ''|*[!0-9]*) _cp_vlt_a2=0 ;; esac
+    case "$_cp_vlt_a3" in ''|*[!0-9]*) _cp_vlt_a3=0 ;; esac
+    case "$_cp_vlt_b1" in ''|*[!0-9]*) _cp_vlt_b1=0 ;; esac
+    case "$_cp_vlt_b2" in ''|*[!0-9]*) _cp_vlt_b2=0 ;; esac
+    case "$_cp_vlt_b3" in ''|*[!0-9]*) _cp_vlt_b3=0 ;; esac
+    [ "$_cp_vlt_a1" -lt "$_cp_vlt_b1" ] && return 0
+    [ "$_cp_vlt_a1" -gt "$_cp_vlt_b1" ] && return 1
+    [ "$_cp_vlt_a2" -lt "$_cp_vlt_b2" ] && return 0
+    [ "$_cp_vlt_a2" -gt "$_cp_vlt_b2" ] && return 1
+    [ "$_cp_vlt_a3" -lt "$_cp_vlt_b3" ] && return 0
+    return 1
+}
+
+# --- Passive update check ---
+
+_CP_REPO_API="${CLAUDE_PROFILE_UPDATE_API_BASE:-https://api.github.com/repos/pegasusheavy/claude-code-profiles}"
+_CP_ASSET_BASE="${CLAUDE_PROFILE_UPDATE_ASSET_BASE:-https://github.com/pegasusheavy/claude-code-profiles/releases/download}"
+_CP_UPDATE_INTERVAL="${CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL:-86400}"
+case "$_CP_UPDATE_INTERVAL" in ''|*[!0-9]*) _CP_UPDATE_INTERVAL=86400 ;; esac
+
+# Extracts and validates a "vX.Y.Z" tag_name from a GitHub releases-API JSON
+# response body. Prints the version WITHOUT the leading 'v' on success;
+# prints nothing on failure (missing field or doesn't match X.Y.Z).
+_cp_extract_tag_version() {
+    _cp_etv_tag=$(printf '%s' "$1" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
+    _cp_etv_tag=${_cp_etv_tag#v}
+    case "$_cp_etv_tag" in
+        [0-9]*.[0-9]*.[0-9]*)
+            case "$_cp_etv_tag" in
+                *[!0-9.]*) return 1 ;;
+            esac
+            printf '%s\n' "$_cp_etv_tag"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Verifies a downloaded file's SHA-256 against a SHA256SUMS file. Usage:
+# _cp_verify_checksum <file> <sums-file>. Requires $_cp_sha_cmd to be set by
+# the caller (sha256sum or "shasum -a 256").
+_cp_verify_checksum() {
+    _cp_vc_file="$1"
+    _cp_vc_sums="$2"
+    _cp_vc_name=$(basename "$_cp_vc_file")
+    _cp_vc_expected=$(grep -F " ${_cp_vc_name}" "$_cp_vc_sums" 2>/dev/null | awk '{print $1}' | head -n1)
+    [ -n "$_cp_vc_expected" ] || return 1
+    _cp_vc_actual=$($_cp_sha_cmd "$_cp_vc_file" | awk '{print $1}')
+    [ "$_cp_vc_expected" = "$_cp_vc_actual" ]
+}
+
+# Fetches, checksum-verifies, and atomically replaces claude-profile.sh (and
+# the shared VERSION file) from the latest GitHub release. Exit status 0 on
+# success, 1 on any failure — never leaves a partial install in place.
+#
+# NOTE: deliberately does NOT use `trap ... EXIT` for temp-dir cleanup.
+# claude-profile.sh is sourced into a long-lived interactive shell, so a
+# trap set here would persist for the rest of the shell session and fire
+# at the wrong time. Cleanup is instead explicit at every return point,
+# matching this file's existing "no set -e" / no-trap discipline.
+_cp_do_update() {
+    _cp_upd_force=0
+    case "${1:-}" in
+        --force) _cp_upd_force=1 ;;
+        "") : ;;
+        *) _cp_die "usage: claude-profile update [--force]"; return 1 ;;
+    esac
+
+    command -v curl >/dev/null 2>&1 || { _cp_die "update requires curl"; return 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        _cp_sha_cmd="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        _cp_sha_cmd="shasum -a 256"
+    else
+        _cp_die "update requires sha256sum or shasum"
+        return 1
+    fi
+
+    _cp_upd_resp=$(curl -fsSL --connect-timeout 10 --max-time 30 "${_CP_REPO_API}/releases/latest" 2>/dev/null) || {
+        _cp_die "update failed: could not reach GitHub"
+        return 1
+    }
+    _cp_upd_latest=$(_cp_extract_tag_version "$_cp_upd_resp")
+    if [ -z "$_cp_upd_latest" ]; then
+        _cp_die "update failed: could not determine latest version"
+        return 1
+    fi
+    _cp_upd_tag="v${_cp_upd_latest}"
+
+    _cp_upd_installed=$(_cp_installed_version)
+    if [ "$_cp_upd_force" -eq 0 ] && [ "$_cp_upd_installed" != "unknown" ] \
+        && ! _cp_version_lt "$_cp_upd_installed" "$_cp_upd_latest"; then
+        _cp_die "already up to date (v${_cp_upd_installed}); latest is v${_cp_upd_latest}"
+        return 1
+    fi
+
+    _cp_upd_install="$(_cp_install_dir)"
+    mkdir -p "$_cp_upd_install" || { _cp_die "update failed: could not create install directory"; return 1; }
+    _cp_upd_tmpdir=$(mktemp -d "${_cp_upd_install}/.update.XXXXXX") || { _cp_die "update failed: could not create temp directory"; return 1; }
+    _cp_upd_base="${_CP_ASSET_BASE}/${_cp_upd_tag}"
+
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${_cp_upd_tmpdir}/SHA256SUMS" "${_cp_upd_base}/SHA256SUMS" 2>/dev/null; then
+        _cp_die "update failed: could not download checksums"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_base}/VERSION" 2>/dev/null; then
+        _cp_die "update failed: could not download VERSION"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_base}/claude-profile.sh" 2>/dev/null; then
+        _cp_die "update failed: could not download claude-profile.sh"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    if ! _cp_verify_checksum "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_tmpdir}/SHA256SUMS"; then
+        _cp_die "update failed: VERSION checksum mismatch"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! _cp_verify_checksum "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_tmpdir}/SHA256SUMS"; then
+        _cp_die "update failed: claude-profile.sh checksum mismatch"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    _cp_upd_downloaded_version=$(cat "${_cp_upd_tmpdir}/VERSION")
+    if [ "$_cp_upd_downloaded_version" != "$_cp_upd_latest" ]; then
+        _cp_die "update failed: downloaded VERSION (${_cp_upd_downloaded_version}) does not match release tag (${_cp_upd_latest})"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    if ! mv -f "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_install}/claude-profile.sh"; then
+        _cp_die "update failed: could not replace claude-profile.sh"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! mv -f "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_install}/VERSION"; then
+        _cp_die "update failed: could not replace VERSION"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    rm -rf "$_cp_upd_tmpdir"
+
+    case "$_cp_upd_installed" in
+        unknown) _cp_upd_installed_display="unknown" ;;
+        *) _cp_upd_installed_display="v${_cp_upd_installed}" ;;
+    esac
+    printf 'Updating claude-profile.sh: %s -> v%s\n' "$_cp_upd_installed_display" "$_cp_upd_latest"
+    printf "Done. Run 'source ~/.bashrc' (or restart your shell) to use the new version.\\n"
+    return 0
+}
+
+# Reads the update-check cache file into _cp_cache_ts / _cp_cache_ver /
+# _cp_cache_notified globals. Defaults (0 / unknown / 0) on missing or
+# unparseable cache — treated identically, per design, so a corrupted file
+# self-heals on the next successful write instead of erroring.
+_cp_read_update_cache() {
+    _cp_cache_ts=0
+    _cp_cache_ver="unknown"
+    _cp_cache_notified=0
+    _cp_cache_file="$(_cp_install_dir)/.update-check"
+    [ -f "$_cp_cache_file" ] || return 0
+    _cp_line_n=0
+    while IFS= read -r _cp_field; do
+        _cp_line_n=$((_cp_line_n + 1))
+        case "$_cp_line_n" in
+            1) case "$_cp_field" in *[!0-9]*|'') ;; *) _cp_cache_ts="$_cp_field" ;; esac ;;
+            2) [ -n "$_cp_field" ] && _cp_cache_ver="$_cp_field" ;;
+            3) case "$_cp_field" in 0|1) _cp_cache_notified="$_cp_field" ;; esac ;;
+        esac
+        [ "$_cp_line_n" -ge 3 ] && break
+    done < "$_cp_cache_file"
+    return 0
+}
+
+# Writes a single value to a file atomically (temp file + rename).
+# Usage: _cp_atomic_write FILE VALUE
+_cp_atomic_write() {
+    _cp_aw_tmp="${1}.tmp.$$"
+    { printf '%s\n' "$2" > "$_cp_aw_tmp"; } 2>/dev/null || { rm -f "$_cp_aw_tmp" 2>/dev/null; return 1; }
+    mv -f "$_cp_aw_tmp" "$1" 2>/dev/null || { rm -f "$_cp_aw_tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+# Rate-limited stderr diagnostic for persistent local cache-file I/O
+# failures (permissions, disk full) -- distinct from transient network
+# failures, which stay silent by design per _cp_update_check. Best-effort:
+# uses a separate marker file so a broken .update-check write doesn't also
+# block this diagnostic; if even the marker can't be written, this
+# degrades to printing every invocation rather than staying silent forever
+# (never worse than the bug being fixed).
+#
+# Deliberately reuses _CP_UPDATE_INTERVAL (default 86400s) as a rolling
+# window approximating the design's "at most once per calendar day" --
+# not a literal calendar-day boundary, and coupled to the same
+# user-tunable CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs
+# the update check's own polling frequency. Lowering that interval (e.g.
+# for testing) also shortens this diagnostic's rate limit; this is an
+# accepted simplification, not a separate config knob.
+#
+# Called from inside _cp_write_update_cache (not from its callers) so the
+# already-resolved install dir and epoch are reused rather than
+# re-resolved — this also means every current and future caller of
+# _cp_write_update_cache gets this diagnostic for free, with no risk of a
+# call site forgetting to check the write's return value.
+# Usage: _cp_warn_cache_write_failure DIR EPOCH
+_cp_warn_cache_write_failure() {
+    _cp_wcf_dir="$1"
+    _cp_wcf_now="$2"
+    _cp_wcf_marker="${_cp_wcf_dir}/.update-check-diag"
+    _cp_wcf_last=0
+    if [ -f "$_cp_wcf_marker" ]; then
+        _cp_wcf_read=$(cat "$_cp_wcf_marker" 2>/dev/null)
+        case "$_cp_wcf_read" in ''|*[!0-9]*) ;; *) _cp_wcf_last="$_cp_wcf_read" ;; esac
+    fi
+    if [ $((_cp_wcf_now - _cp_wcf_last)) -ge "$_CP_UPDATE_INTERVAL" ]; then
+        printf 'claude-profile: warning: could not write update-check cache in %s -- update notifications may not work until this is fixed\n' "$_cp_wcf_dir" >&2
+        _cp_atomic_write "$_cp_wcf_marker" "$_cp_wcf_now"
+    fi
+    return 0
+}
+
+# Writes the cache atomically (temp file + rename), so concurrent
+# invocations can't torn-write it. Usage: _cp_write_update_cache TS VER NOTIFIED
+_cp_write_update_cache() {
+    _cp_wuc_dir="$(_cp_install_dir)"
+    mkdir -p "$_cp_wuc_dir" 2>/dev/null || { _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"; return 1; }
+    _cp_wuc_file="${_cp_wuc_dir}/.update-check"
+    _cp_wuc_tmp="${_cp_wuc_file}.tmp.$$"
+    if ! printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$_cp_wuc_tmp" 2>/dev/null; then
+        rm -f "$_cp_wuc_tmp" 2>/dev/null
+        _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"
+        return 1
+    fi
+    mv -f "$_cp_wuc_tmp" "$_cp_wuc_file" 2>/dev/null || {
+        rm -f "$_cp_wuc_tmp" 2>/dev/null
+        _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"
+        return 1
+    }
+    return 0
+}
+
+# Runs the passive update check, rate-limited to once per
+# CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL seconds (default 24h). Prints a
+# one-line stderr notice the first time a newer version is seen. Every
+# failure path is a silent no-op — this must never block or break claude().
+_cp_update_check() {
+    [ -n "${CLAUDE_PROFILE_NO_UPDATE_CHECK:-}" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    _cp_read_update_cache
+
+    _cp_now=$(date +%s 2>/dev/null) || return 0
+    case "$_cp_now" in ''|*[!0-9]*) return 0 ;; esac
+    _cp_elapsed=$((_cp_now - _cp_cache_ts))
+
+    if [ "$_cp_elapsed" -ge "$_CP_UPDATE_INTERVAL" ]; then
+        _cp_resp=$(curl -fsSL --connect-timeout 3 --max-time 3 "${_CP_REPO_API}/releases/latest" 2>/dev/null)
+        _cp_new_ver="$_cp_cache_ver"
+        if [ -n "$_cp_resp" ]; then
+            _cp_extracted=$(_cp_extract_tag_version "$_cp_resp")
+            [ -n "$_cp_extracted" ] && _cp_new_ver="$_cp_extracted"
+        fi
+        if [ "$_cp_new_ver" != "$_cp_cache_ver" ]; then
+            _cp_write_update_cache "$_cp_now" "$_cp_new_ver" 0
+            _cp_cache_ver="$_cp_new_ver"
+            _cp_cache_notified=0
+        else
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" "$_cp_cache_notified"
+        fi
+    fi
+
+    if [ "$_cp_cache_notified" = "0" ] && [ "$_cp_cache_ver" != "unknown" ]; then
+        _cp_installed=$(_cp_installed_version)
+        if _cp_version_lt "$_cp_installed" "$_cp_cache_ver"; then
+            case "$_cp_installed" in
+                unknown) _cp_installed_display="unknown" ;;
+                *) _cp_installed_display="v${_cp_installed}" ;;
+            esac
+            printf "A new claude-profile version is available (%s -> v%s). Run 'claude-profile update' to upgrade.\\n" \
+                "$_cp_installed_display" "$_cp_cache_ver" >&2
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" 1
+        fi
+    fi
+    return 0
+}
+
 # --- claude() wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
 # it passes through without overriding.
 
 claude() {
+    _cp_update_check
     if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
         _cp_data=$(_cp_data_dir)
         _cp_def="${_cp_data}/.default"
@@ -352,6 +693,15 @@ SETTINGSEOF
             esac
             ;;
 
+        version)
+            _cp_installed_version
+            ;;
+
+        update)
+            shift
+            _cp_do_update "${1:-}"
+            ;;
+
         help|-h|--help)
             cat <<'HELPEOF'
 Usage: claude-profile [command] [args...]
@@ -363,6 +713,8 @@ Commands:
     list, ls                List all profiles
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
+    version                 Show the installed version
+    update [--force]        Update to the latest release
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 

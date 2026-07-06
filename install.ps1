@@ -79,12 +79,20 @@ foreach ($script in $Scripts) {
     $dest = Join-Path $installDir $script
     Write-Info "  $script -> $dest"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 30
     } catch {
         Write-Fail "Failed to download $script from $url : $_"
     }
 }
 Write-Info 'Downloaded successfully.'
+
+Write-Step 'Downloading VERSION...'
+try {
+    Invoke-WebRequest -Uri "$RepoBase/VERSION" -OutFile (Join-Path $installDir 'VERSION') -UseBasicParsing -TimeoutSec 30
+    Write-Info 'Downloaded VERSION.'
+} catch {
+    Write-Warn "Could not download VERSION file. Update notifications will show 'unknown' until the next successful 'claude-profile update'."
+}
 
 Write-Step 'Checking PATH...'
 if (Test-OnPath $installDir) {
