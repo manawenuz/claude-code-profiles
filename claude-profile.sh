@@ -133,6 +133,7 @@ _cp_version_lt() {
 
 _CP_REPO_API="${CLAUDE_PROFILE_UPDATE_API_BASE:-https://api.github.com/repos/pegasusheavy/claude-code-profiles}"
 _CP_UPDATE_INTERVAL="${CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL:-86400}"
+case "$_CP_UPDATE_INTERVAL" in ''|*[!0-9]*) _CP_UPDATE_INTERVAL=86400 ;; esac
 
 # Extracts and validates a "vX.Y.Z" tag_name from a GitHub releases-API JSON
 # response body. Prints the version WITHOUT the leading 'v' on success;
