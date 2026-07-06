@@ -126,7 +126,9 @@ set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
     echo %~2
     echo %~3
 )>"!_wuc_tmp!" 2>nul
-if exist "!_wuc_tmp!" move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
+if exist "!_wuc_tmp!" (
+    move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1 || del /f /q "!_wuc_tmp!" >nul 2>&1
+)
 goto :eof
 
 :cp_update_check
@@ -176,6 +178,10 @@ if "!_cpu_notified!"=="0" if not "!_cpu_ver!"=="unknown" (
     set "_cpu_installed=unknown"
     if exist "%_CP_VERSION_FILE%" set /p _cpu_installed=<"%_CP_VERSION_FILE%"
     if "!_cpu_installed!"=="" set "_cpu_installed=unknown"
+    if not "!_cpu_installed!"=="unknown" (
+        echo !_cpu_installed!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+        if errorlevel 1 set "_cpu_installed=unknown"
+    )
     call :version_lt "!_cpu_installed!" "!_cpu_ver!"
     if not errorlevel 1 (
         echo A new claude-profile version is available ^(v!_cpu_installed! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
