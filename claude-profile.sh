@@ -200,16 +200,12 @@ _cp_do_update() {
         _cp_die "update failed: could not reach GitHub"
         return 1
     }
-    _cp_upd_tag=$(printf '%s' "$_cp_upd_resp" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
-    if [ -z "$_cp_upd_tag" ]; then
+    _cp_upd_latest=$(_cp_extract_tag_version "$_cp_upd_resp")
+    if [ -z "$_cp_upd_latest" ]; then
         _cp_die "update failed: could not determine latest version"
         return 1
     fi
-    _cp_upd_latest="${_cp_upd_tag#v}"
-    case "$_cp_upd_latest" in
-        [0-9]*.[0-9]*.[0-9]*) : ;;
-        *) _cp_die "update failed: unexpected version format from GitHub"; return 1 ;;
-    esac
+    _cp_upd_tag="v${_cp_upd_latest}"
 
     _cp_upd_installed=$(_cp_installed_version)
     if [ "$_cp_upd_force" -eq 0 ] && [ "$_cp_upd_installed" != "unknown" ] \
@@ -218,7 +214,9 @@ _cp_do_update() {
         return 1
     fi
 
-    _cp_upd_tmpdir=$(mktemp -d) || { _cp_die "update failed: could not create temp directory"; return 1; }
+    _cp_upd_install="$(_cp_install_dir)"
+    mkdir -p "$_cp_upd_install" || { _cp_die "update failed: could not create install directory"; return 1; }
+    _cp_upd_tmpdir=$(mktemp -d "${_cp_upd_install}/.update.XXXXXX") || { _cp_die "update failed: could not create temp directory"; return 1; }
     _cp_upd_base="${_CP_ASSET_BASE}/${_cp_upd_tag}"
 
     if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${_cp_upd_tmpdir}/SHA256SUMS" "${_cp_upd_base}/SHA256SUMS" 2>/dev/null; then
@@ -255,14 +253,16 @@ _cp_do_update() {
         return 1
     fi
 
-    _cp_upd_install="$(_cp_install_dir)"
-    mkdir -p "$_cp_upd_install" || { _cp_die "update failed: could not create install directory"; rm -rf "$_cp_upd_tmpdir"; return 1; }
     if ! mv -f "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_install}/claude-profile.sh"; then
         _cp_die "update failed: could not replace claude-profile.sh"
         rm -rf "$_cp_upd_tmpdir"
         return 1
     fi
-    mv -f "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_install}/VERSION"
+    if ! mv -f "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_install}/VERSION"; then
+        _cp_die "update failed: could not replace VERSION"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
     rm -rf "$_cp_upd_tmpdir"
 
     printf 'Updating claude-profile.sh: v%s -> v%s\n' "$_cp_upd_installed" "$_cp_upd_latest"
