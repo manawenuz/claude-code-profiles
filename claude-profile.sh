@@ -312,6 +312,30 @@ _cp_write_update_cache() {
     return 0
 }
 
+# Rate-limited (at most once per _CP_UPDATE_INTERVAL) stderr diagnostic for
+# persistent local cache-file I/O failures (permissions, disk full) --
+# distinct from transient network failures, which stay silent by design
+# per _cp_update_check. Best-effort: uses a separate marker file so a
+# broken .update-check write doesn't also block this diagnostic; if even
+# the marker can't be written, this degrades to printing every invocation
+# rather than staying silent forever (never worse than the bug being fixed).
+_cp_warn_cache_write_failure() {
+    _cp_wcf_dir="$(_cp_install_dir)"
+    _cp_wcf_marker="${_cp_wcf_dir}/.update-check-diag"
+    _cp_wcf_last=0
+    if [ -f "$_cp_wcf_marker" ]; then
+        _cp_wcf_last=$(cat "$_cp_wcf_marker" 2>/dev/null)
+        case "$_cp_wcf_last" in ''|*[!0-9]*) _cp_wcf_last=0 ;; esac
+    fi
+    _cp_wcf_now=$(date +%s 2>/dev/null)
+    case "$_cp_wcf_now" in ''|*[!0-9]*) return 0 ;; esac
+    if [ $((_cp_wcf_now - _cp_wcf_last)) -ge "$_CP_UPDATE_INTERVAL" ]; then
+        printf 'claude-profile: warning: could not write update-check cache in %s -- update notifications may not work until this is fixed\n' "$_cp_wcf_dir" >&2
+        printf '%s\n' "$_cp_wcf_now" > "$_cp_wcf_marker" 2>/dev/null
+    fi
+    return 0
+}
+
 # Runs the passive update check, rate-limited to once per
 # CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL seconds (default 24h). Prints a
 # one-line stderr notice the first time a newer version is seen. Every
@@ -334,11 +358,11 @@ _cp_update_check() {
             [ -n "$_cp_extracted" ] && _cp_new_ver="$_cp_extracted"
         fi
         if [ "$_cp_new_ver" != "$_cp_cache_ver" ]; then
-            _cp_write_update_cache "$_cp_now" "$_cp_new_ver" 0
+            _cp_write_update_cache "$_cp_now" "$_cp_new_ver" 0 || _cp_warn_cache_write_failure
             _cp_cache_ver="$_cp_new_ver"
             _cp_cache_notified=0
         else
-            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" "$_cp_cache_notified"
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" "$_cp_cache_notified" || _cp_warn_cache_write_failure
         fi
     fi
 
@@ -351,7 +375,7 @@ _cp_update_check() {
             esac
             printf "A new claude-profile version is available (%s -> v%s). Run 'claude-profile update' to upgrade.\\n" \
                 "$_cp_installed_display" "$_cp_cache_ver" >&2
-            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" 1
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" 1 || _cp_warn_cache_write_failure
         fi
     fi
     return 0
