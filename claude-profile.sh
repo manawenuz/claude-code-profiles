@@ -297,18 +297,70 @@ _cp_read_update_cache() {
     return 0
 }
 
+# Writes a single value to a file atomically (temp file + rename).
+# Usage: _cp_atomic_write FILE VALUE
+_cp_atomic_write() {
+    _cp_aw_tmp="${1}.tmp.$$"
+    { printf '%s\n' "$2" > "$_cp_aw_tmp"; } 2>/dev/null || { rm -f "$_cp_aw_tmp" 2>/dev/null; return 1; }
+    mv -f "$_cp_aw_tmp" "$1" 2>/dev/null || { rm -f "$_cp_aw_tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+# Rate-limited stderr diagnostic for persistent local cache-file I/O
+# failures (permissions, disk full) -- distinct from transient network
+# failures, which stay silent by design per _cp_update_check. Best-effort:
+# uses a separate marker file so a broken .update-check write doesn't also
+# block this diagnostic; if even the marker can't be written, this
+# degrades to printing every invocation rather than staying silent forever
+# (never worse than the bug being fixed).
+#
+# Deliberately reuses _CP_UPDATE_INTERVAL (default 86400s) as a rolling
+# window approximating the design's "at most once per calendar day" --
+# not a literal calendar-day boundary, and coupled to the same
+# user-tunable CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs
+# the update check's own polling frequency. Lowering that interval (e.g.
+# for testing) also shortens this diagnostic's rate limit; this is an
+# accepted simplification, not a separate config knob.
+#
+# Called from inside _cp_write_update_cache (not from its callers) so the
+# already-resolved install dir and epoch are reused rather than
+# re-resolved — this also means every current and future caller of
+# _cp_write_update_cache gets this diagnostic for free, with no risk of a
+# call site forgetting to check the write's return value.
+# Usage: _cp_warn_cache_write_failure DIR EPOCH
+_cp_warn_cache_write_failure() {
+    _cp_wcf_dir="$1"
+    _cp_wcf_now="$2"
+    _cp_wcf_marker="${_cp_wcf_dir}/.update-check-diag"
+    _cp_wcf_last=0
+    if [ -f "$_cp_wcf_marker" ]; then
+        _cp_wcf_read=$(cat "$_cp_wcf_marker" 2>/dev/null)
+        case "$_cp_wcf_read" in ''|*[!0-9]*) ;; *) _cp_wcf_last="$_cp_wcf_read" ;; esac
+    fi
+    if [ $((_cp_wcf_now - _cp_wcf_last)) -ge "$_CP_UPDATE_INTERVAL" ]; then
+        printf 'claude-profile: warning: could not write update-check cache in %s -- update notifications may not work until this is fixed\n' "$_cp_wcf_dir" >&2
+        _cp_atomic_write "$_cp_wcf_marker" "$_cp_wcf_now"
+    fi
+    return 0
+}
+
 # Writes the cache atomically (temp file + rename), so concurrent
 # invocations can't torn-write it. Usage: _cp_write_update_cache TS VER NOTIFIED
 _cp_write_update_cache() {
     _cp_wuc_dir="$(_cp_install_dir)"
-    mkdir -p "$_cp_wuc_dir" 2>/dev/null || return 1
+    mkdir -p "$_cp_wuc_dir" 2>/dev/null || { _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"; return 1; }
     _cp_wuc_file="${_cp_wuc_dir}/.update-check"
     _cp_wuc_tmp="${_cp_wuc_file}.tmp.$$"
     if ! printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$_cp_wuc_tmp" 2>/dev/null; then
         rm -f "$_cp_wuc_tmp" 2>/dev/null
+        _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"
         return 1
     fi
-    mv -f "$_cp_wuc_tmp" "$_cp_wuc_file" 2>/dev/null || { rm -f "$_cp_wuc_tmp" 2>/dev/null; return 1; }
+    mv -f "$_cp_wuc_tmp" "$_cp_wuc_file" 2>/dev/null || {
+        rm -f "$_cp_wuc_tmp" 2>/dev/null
+        _cp_warn_cache_write_failure "$_cp_wuc_dir" "$1"
+        return 1
+    }
     return 0
 }
 

@@ -119,6 +119,17 @@ To disable the passive check entirely, set:
 export CLAUDE_PROFILE_NO_UPDATE_CHECK=1
 ```
 
+If the update-check cache itself can't be written (permissions, a full
+disk), you'll see a similar one-time-per-day warning instead:
+
+```
+claude-profile: warning: could not write update-check cache in ~/.local/share/claude-profile -- update notifications may not work until this is fixed
+```
+
+This doesn't block `claude` from running — it's just letting you know
+update notifications may be unreliable until the underlying issue is
+fixed.
+
 ## Platform Support
 
 | Script | Platform | Shell |
