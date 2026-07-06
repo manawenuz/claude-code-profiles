@@ -129,12 +129,112 @@ _cp_version_lt() {
     return 1
 }
 
+# --- Passive update check ---
+
+_CP_REPO_API="${CLAUDE_PROFILE_UPDATE_API_BASE:-https://api.github.com/repos/pegasusheavy/claude-code-profiles}"
+_CP_UPDATE_INTERVAL="${CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL:-86400}"
+
+# Extracts and validates a "vX.Y.Z" tag_name from a GitHub releases-API JSON
+# response body. Prints the version WITHOUT the leading 'v' on success;
+# prints nothing on failure (missing field or doesn't match X.Y.Z).
+_cp_extract_tag_version() {
+    _cp_etv_tag=$(printf '%s' "$1" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
+    _cp_etv_tag=${_cp_etv_tag#v}
+    case "$_cp_etv_tag" in
+        [0-9]*.[0-9]*.[0-9]*)
+            case "$_cp_etv_tag" in
+                *[!0-9.]*) return 1 ;;
+            esac
+            printf '%s\n' "$_cp_etv_tag"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Reads the update-check cache file into _cp_cache_ts / _cp_cache_ver /
+# _cp_cache_notified globals. Defaults (0 / unknown / 0) on missing or
+# unparseable cache — treated identically, per design, so a corrupted file
+# self-heals on the next successful write instead of erroring.
+_cp_read_update_cache() {
+    _cp_cache_ts=0
+    _cp_cache_ver="unknown"
+    _cp_cache_notified=0
+    _cp_cache_file="$(_cp_install_dir)/.update-check"
+    [ -f "$_cp_cache_file" ] || return 0
+    _cp_line_n=0
+    while IFS= read -r _cp_field; do
+        _cp_line_n=$((_cp_line_n + 1))
+        case "$_cp_line_n" in
+            1) case "$_cp_field" in *[!0-9]*|'') ;; *) _cp_cache_ts="$_cp_field" ;; esac ;;
+            2) [ -n "$_cp_field" ] && _cp_cache_ver="$_cp_field" ;;
+            3) case "$_cp_field" in 0|1) _cp_cache_notified="$_cp_field" ;; esac ;;
+        esac
+    done < "$_cp_cache_file"
+    return 0
+}
+
+# Writes the cache atomically (temp file + rename), so concurrent
+# invocations can't torn-write it. Usage: _cp_write_update_cache TS VER NOTIFIED
+_cp_write_update_cache() {
+    _cp_wuc_dir="$(_cp_install_dir)"
+    mkdir -p "$_cp_wuc_dir" 2>/dev/null || return 1
+    _cp_wuc_file="${_cp_wuc_dir}/.update-check"
+    _cp_wuc_tmp="${_cp_wuc_file}.tmp.$$"
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$_cp_wuc_tmp" 2>/dev/null || return 1
+    mv -f "$_cp_wuc_tmp" "$_cp_wuc_file" 2>/dev/null || { rm -f "$_cp_wuc_tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+# Runs the passive update check, rate-limited to once per
+# CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL seconds (default 24h). Prints a
+# one-line stderr notice the first time a newer version is seen. Every
+# failure path is a silent no-op — this must never block or break claude().
+_cp_update_check() {
+    [ -n "${CLAUDE_PROFILE_NO_UPDATE_CHECK:-}" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    _cp_read_update_cache
+
+    _cp_now=$(date +%s 2>/dev/null) || return 0
+    _cp_elapsed=$((_cp_now - _cp_cache_ts))
+
+    if [ "$_cp_elapsed" -ge "$_CP_UPDATE_INTERVAL" ]; then
+        _cp_resp=$(curl -fsSL --connect-timeout 3 --max-time 3 "${_CP_REPO_API}/releases/latest" 2>/dev/null)
+        _cp_new_ver="$_cp_cache_ver"
+        if [ -n "$_cp_resp" ]; then
+            _cp_extracted=$(_cp_extract_tag_version "$_cp_resp")
+            [ -n "$_cp_extracted" ] && _cp_new_ver="$_cp_extracted"
+        fi
+        if [ "$_cp_new_ver" != "$_cp_cache_ver" ]; then
+            _cp_write_update_cache "$_cp_now" "$_cp_new_ver" 0
+            _cp_cache_ver="$_cp_new_ver"
+            _cp_cache_notified=0
+        else
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" "$_cp_cache_notified"
+        fi
+    fi
+
+    if [ "$_cp_cache_notified" = "0" ] && [ "$_cp_cache_ver" != "unknown" ]; then
+        _cp_installed=$(_cp_installed_version)
+        if _cp_version_lt "$_cp_installed" "$_cp_cache_ver"; then
+            printf "A new claude-profile version is available (v%s -> v%s). Run 'claude-profile update' to upgrade.\\n" \
+                "$_cp_installed" "$_cp_cache_ver" >&2
+            _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" 1
+        fi
+    fi
+    return 0
+}
+
 # --- claude() wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
 # it passes through without overriding.
 
 claude() {
+    _cp_update_check
     if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
         _cp_data=$(_cp_data_dir)
         _cp_def="${_cp_data}/.default"
