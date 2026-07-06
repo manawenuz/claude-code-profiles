@@ -134,7 +134,7 @@ set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
     echo %~1
     echo %~2
     echo %~3
-)>"!_wuc_tmp!" 2>nul
+) 2>nul >"!_wuc_tmp!"
 if not exist "!_wuc_tmp!" exit /b 1
 move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
 if errorlevel 1 (
@@ -163,11 +163,14 @@ set "_wcf_last=0"
 if exist "!_wcf_marker!" set /p _wcf_last=<"!_wcf_marker!"
 echo !_wcf_last!| findstr /R "^[0-9][0-9]*$" >nul 2>&1
 if errorlevel 1 set "_wcf_last=0"
+set "_wcf_saved_epoch=!_cp_epoch!"
 call :get_epoch
-set /a _wcf_elapsed=_cp_epoch-_wcf_last
+set "_wcf_now=!_cp_epoch!"
+set "_cp_epoch=!_wcf_saved_epoch!"
+set /a _wcf_elapsed=_wcf_now-_wcf_last
 if !_wcf_elapsed! geq !_CP_UPDATE_INTERVAL! (
     echo claude-profile: warning: could not write update-check cache in %_CP_INSTALL_DIR% -- update notifications may not work until this is fixed >&2
-    2>nul >"!_wcf_marker!" echo !_cp_epoch!
+    2>nul >"!_wcf_marker!" echo !_wcf_now!
 )
 goto :eof
 
