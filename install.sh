@@ -46,8 +46,8 @@ download_file() {
     _dl_url="$1"
     _dl_dest="$2"
     case "$DOWNLOAD_CMD" in
-        curl) curl -fsSL "$_dl_url" -o "$_dl_dest" ;;
-        wget) wget -qO "$_dl_dest" "$_dl_url" ;;
+        curl) curl -fsSL --connect-timeout 10 --max-time 60 "$_dl_url" -o "$_dl_dest" ;;
+        wget) wget -qO "$_dl_dest" --timeout=60 "$_dl_url" ;;
     esac
 }
 
@@ -111,6 +111,13 @@ main() {
     cp "$_tmp_file" "${INSTALL_DIR}/claude-profile.sh"
     chmod +r "${INSTALL_DIR}/claude-profile.sh"
     info "Installed: ${INSTALL_DIR}/claude-profile.sh"
+
+    step "Downloading VERSION..."
+    if download_file "${REPO_BASE}/VERSION" "${INSTALL_DIR}/VERSION"; then
+        info "Installed: ${INSTALL_DIR}/VERSION"
+    else
+        warn "Could not download VERSION file. Update notifications will show 'unknown' until the next successful 'claude-profile update'."
+    fi
 
     # Detect shell profile and auto-append source line
     step "Configuring shell..."
