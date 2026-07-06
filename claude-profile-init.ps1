@@ -127,7 +127,8 @@ function Invoke-CPUpdateCheck {
         if ($cache.Notified -eq 0 -and $cache.Version -ne 'unknown') {
             $installed = Get-CPInstalledVersion
             if (Test-CPVersionLessThan -A $installed -B $cache.Version) {
-                $host.UI.WriteErrorLine("A new claude-profile version is available (v$installed -> v$($cache.Version)). Run 'claude-profile update' to upgrade.")
+                $installedDisplay = if ($installed -eq 'unknown') { 'unknown' } else { "v$installed" }
+                $host.UI.WriteErrorLine("A new claude-profile version is available ($installedDisplay -> v$($cache.Version)). Run 'claude-profile update' to upgrade.")
                 Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified 1
             }
         }
@@ -475,7 +476,8 @@ function claude-profile {
                     return
                 }
 
-                Write-Host "Updating claude-profile-init.ps1: v$installed -> v$latest"
+                $installedDisplay = if ($installed -eq 'unknown') { 'unknown' } else { "v$installed" }
+                Write-Host "Updating claude-profile-init.ps1: $installedDisplay -> v$latest"
                 Write-Host "Done. Run '. `$PROFILE' (or restart PowerShell) to use the new version."
             } finally {
                 Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
