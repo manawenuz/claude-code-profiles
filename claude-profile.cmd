@@ -124,7 +124,9 @@ if !_vlt_a2! gtr !_vlt_b2! exit /b 1
 if !_vlt_a3! lss !_vlt_b3! exit /b 0
 exit /b 1
 
-:: write_update_cache <epoch> <version> <notified> — atomic via temp+rename
+:: write_update_cache <epoch> <version> <notified> — atomic via temp+rename.
+:: Signals success/failure via errorlevel (exit /b 0/1) so callers can
+:: detect persistent local cache I/O failures.
 :write_update_cache
 if not exist "%_CP_INSTALL_DIR%" mkdir "%_CP_INSTALL_DIR%" >nul 2>&1
 set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
@@ -133,8 +135,39 @@ set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
     echo %~2
     echo %~3
 )>"!_wuc_tmp!" 2>nul
-if exist "!_wuc_tmp!" (
-    move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1 || del /f /q "!_wuc_tmp!" >nul 2>&1
+if not exist "!_wuc_tmp!" exit /b 1
+move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
+if errorlevel 1 (
+    del /f /q "!_wuc_tmp!" >nul 2>&1
+    exit /b 1
+)
+exit /b 0
+
+:: Rate-limited stderr diagnostic for persistent local cache-file I/O
+:: failures (permissions, disk full) -- distinct from transient network
+:: failures, which stay silent by design in :cp_update_check. Best-effort:
+:: uses a separate marker file so a broken .update-check write doesn't
+:: also block this diagnostic; if even the marker can't be written, this
+:: degrades to printing every invocation rather than staying silent
+:: forever (never worse than the bug being fixed).
+::
+:: Deliberately reuses _CP_UPDATE_INTERVAL (default 86400s) as a rolling
+:: window approximating "at most once per calendar day" -- not a literal
+:: calendar-day boundary, and coupled to the same user-tunable
+:: CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs the update
+:: check's own polling frequency. This is an accepted simplification, not
+:: a separate config knob (matches the sh/ps1 implementations' tradeoff).
+:warn_cache_write_failure
+set "_wcf_marker=%_CP_INSTALL_DIR%\.update-check-diag"
+set "_wcf_last=0"
+if exist "!_wcf_marker!" set /p _wcf_last=<"!_wcf_marker!"
+echo !_wcf_last!| findstr /R "^[0-9][0-9]*$" >nul 2>&1
+if errorlevel 1 set "_wcf_last=0"
+call :get_epoch
+set /a _wcf_elapsed=_cp_epoch-_wcf_last
+if !_wcf_elapsed! geq !_CP_UPDATE_INTERVAL! (
+    echo claude-profile: warning: could not write update-check cache in %_CP_INSTALL_DIR% -- update notifications may not work until this is fixed >&2
+    2>nul >"!_wcf_marker!" echo !_cp_epoch!
 )
 goto :eof
 
@@ -174,10 +207,12 @@ if !_cpu_elapsed! geq !_CP_UPDATE_INTERVAL! (
     )
     if not "!_cpu_new_ver!"=="!_cpu_ver!" (
         call :write_update_cache "!_cp_epoch!" "!_cpu_new_ver!" "0"
+        if errorlevel 1 call :warn_cache_write_failure
         set "_cpu_ver=!_cpu_new_ver!"
         set "_cpu_notified=0"
     ) else (
         call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "!_cpu_notified!"
+        if errorlevel 1 call :warn_cache_write_failure
     )
 )
 
@@ -195,6 +230,7 @@ if "!_cpu_notified!"=="0" if not "!_cpu_ver!"=="unknown" (
         if "!_cpu_installed!"=="unknown" set "_cpu_installed_display=unknown"
         echo A new claude-profile version is available ^(!_cpu_installed_display! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
         call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "1"
+        if errorlevel 1 call :warn_cache_write_failure
     )
 )
 goto :eof
