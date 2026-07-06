@@ -115,6 +115,12 @@ _cp_version_lt() {
     _cp_vlt_b3=$(printf '%s' "$_cp_vlt_b" | cut -d. -f3)
     _cp_vlt_a1=${_cp_vlt_a1:-0}; _cp_vlt_a2=${_cp_vlt_a2:-0}; _cp_vlt_a3=${_cp_vlt_a3:-0}
     _cp_vlt_b1=${_cp_vlt_b1:-0}; _cp_vlt_b2=${_cp_vlt_b2:-0}; _cp_vlt_b3=${_cp_vlt_b3:-0}
+    case "$_cp_vlt_a1" in ''|*[!0-9]*) _cp_vlt_a1=0 ;; esac
+    case "$_cp_vlt_a2" in ''|*[!0-9]*) _cp_vlt_a2=0 ;; esac
+    case "$_cp_vlt_a3" in ''|*[!0-9]*) _cp_vlt_a3=0 ;; esac
+    case "$_cp_vlt_b1" in ''|*[!0-9]*) _cp_vlt_b1=0 ;; esac
+    case "$_cp_vlt_b2" in ''|*[!0-9]*) _cp_vlt_b2=0 ;; esac
+    case "$_cp_vlt_b3" in ''|*[!0-9]*) _cp_vlt_b3=0 ;; esac
     [ "$_cp_vlt_a1" -lt "$_cp_vlt_b1" ] && return 0
     [ "$_cp_vlt_a1" -gt "$_cp_vlt_b1" ] && return 1
     [ "$_cp_vlt_a2" -lt "$_cp_vlt_b2" ] && return 0
