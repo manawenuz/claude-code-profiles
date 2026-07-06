@@ -44,12 +44,89 @@ function Test-CPVersionLessThan {
     }
 }
 
+# --- Passive update check ---
+
+$Script:CPRepoApi = if ($env:CLAUDE_PROFILE_UPDATE_API_BASE) { $env:CLAUDE_PROFILE_UPDATE_API_BASE } else { 'https://api.github.com/repos/pegasusheavy/claude-code-profiles' }
+$Script:CPUpdateInterval = if ($env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL) { [long]$env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL } else { 86400 }
+
+function Get-CPTagVersion {
+    param([string]$Json)
+    if ($Json -notmatch '"tag_name"\s*:\s*"([^"]*)"') { return $null }
+    $tag = $Matches[1].TrimStart('v')
+    if ($tag -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { return $null }
+    return $tag
+}
+
+function Read-CPUpdateCache {
+    $cacheFile = Join-Path (Get-CPInstallDir) '.update-check'
+    $result = [ordered]@{ Timestamp = [long]0; Version = 'unknown'; Notified = 0 }
+    if (-not (Test-Path $cacheFile)) { return $result }
+    $lines = @(Get-Content $cacheFile -ErrorAction SilentlyContinue)
+    if ($lines.Count -ge 1 -and $lines[0] -match '^\d+$') { $result.Timestamp = [long]$lines[0] }
+    if ($lines.Count -ge 2 -and $lines[1]) { $result.Version = $lines[1] }
+    if ($lines.Count -ge 3 -and ($lines[2] -eq '0' -or $lines[2] -eq '1')) { $result.Notified = [int]$lines[2] }
+    return $result
+}
+
+# Atomic write: temp file + Move-Item, so a crash mid-write can't corrupt
+# the cache that every claude() invocation reads.
+function Write-CPUpdateCache {
+    param([long]$Timestamp, [string]$Version, [int]$Notified)
+    $installDir = Get-CPInstallDir
+    New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $cacheFile = Join-Path $installDir '.update-check'
+    $tmpFile = "$cacheFile.tmp.$PID"
+    try {
+        Set-Content -Path $tmpFile -Value "$Timestamp`n$Version`n$Notified" -ErrorAction Stop
+        Move-Item -Path $tmpFile -Destination $cacheFile -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-CPUpdateCheck {
+    if ($env:CLAUDE_PROFILE_NO_UPDATE_CHECK) { return }
+    try {
+        $cache = Read-CPUpdateCache
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+        if (($now - $cache.Timestamp) -ge $Script:CPUpdateInterval) {
+            $newVer = $cache.Version
+            try {
+                $resp = Invoke-RestMethod -Uri "$($Script:CPRepoApi)/releases/latest" -TimeoutSec 3 -ErrorAction Stop
+                $extracted = Get-CPTagVersion -Json ($resp | ConvertTo-Json -Compress)
+                if ($extracted) { $newVer = $extracted }
+            } catch {
+                # network/API failure: silently keep the previous cached version
+            }
+            if ($newVer -ne $cache.Version) {
+                Write-CPUpdateCache -Timestamp $now -Version $newVer -Notified 0
+                $cache.Version = $newVer
+                $cache.Notified = 0
+            } else {
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified $cache.Notified
+            }
+        }
+
+        if ($cache.Notified -eq 0 -and $cache.Version -ne 'unknown') {
+            $installed = Get-CPInstalledVersion
+            if (Test-CPVersionLessThan -A $installed -B $cache.Version) {
+                $host.UI.WriteErrorLine("A new claude-profile version is available (v$installed -> v$($cache.Version)). Run 'claude-profile update' to upgrade.")
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified 1
+            }
+        }
+    } catch {
+        # Never let the update check break claude() startup.
+    }
+}
+
 # --- claude wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
 # it passes through without overriding.
 
 function claude {
+    Invoke-CPUpdateCheck
     if (-not $env:CLAUDE_CONFIG_DIR) {
         if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
             $DataDir = Join-Path $env:LOCALAPPDATA 'claude-profiles'
