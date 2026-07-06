@@ -12,6 +12,11 @@
 
 **Testing note:** this repo has no automated test framework — verification is manual, per its own convention ("No build step. No test framework. Manual verification by running commands against real profiles."). Every task below replaces the usual "write failing test / implement / run test" cycle with "implement / manually verify with exact commands and expected output," plus `shellcheck`/`checkbashisms` where the project's own `## Checking Scripts` convention already calls for it.
 
+**Rebase note (read before Task 2):** this plan was originally written against an older snapshot of `claude-profile.sh` and `claude-profile-init.ps1`. Two upstream changes landed since (PR #4 "fix(windows): fix profile name truncation in PS and validation in CMD", PR #10 "feat(shell): add --init flag to create command for settings skeleton") that this plan has been updated to account for:
+
+1. `claude-profile-init.ps1` no longer has a `$Rest` variable — `claude-profile`'s dispatch now indexes `$args` directly (`$args[1]`, `$args[2]`, ...). Every ps1 snippet below already reflects this; if you see `$Rest` anywhere, that's stale and should be `$args`.
+2. `claude-profile.sh` grew by ~60 lines from the `--init` flag feature, and `claude-profile.cmd`'s name-validation logic was simplified to a single `findstr` call. **Any absolute line number cited below may be off by a few lines** — every insertion point is also described by anchor text (a nearby comment, case label, or function name). Trust the anchor text, not the parenthetical line number, and use Read + Edit's exact-string matching rather than jumping to a line number.
+
 ---
 
 ## File Structure
@@ -158,7 +163,7 @@ _cp_version_lt() {
 
 - [ ] **Step 2: Add the `version` case to `claude-profile()` dispatch**
 
-Add immediately before the `help|-h|--help)` case (before line 302):
+Add immediately before the `help|-h|--help)` case:
 
 ```sh
         version)
@@ -273,7 +278,7 @@ function Test-CPVersionLessThan {
 
 - [ ] **Step 2: Add the `version` case to `claude-profile`'s switch**
 
-Add immediately before the `{ $_ -eq 'help' -or $_ -eq '-h' -or $_ -eq '--help' }` case (before line 276):
+Add immediately before the `{ $_ -eq 'help' -or $_ -eq '-h' -or $_ -eq '--help' }` case:
 
 ```powershell
         'version' {
@@ -353,7 +358,7 @@ goto :cmd_version
 
 - [ ] **Step 4: Add the `version` command**
 
-After `:cmd_default`'s `exit /b 0` (after line 202), add:
+After `:cmd_default`'s `exit /b 0` (the block ending right before the `:cmd_which` label), add:
 
 ```bat
 :cmd_version
@@ -1158,7 +1163,7 @@ Add next to the `'version'` case added in Task 3:
 
 ```powershell
         'update' {
-            $Force = $Rest -contains '--force'
+            $Force = $args -contains '--force'
 
             try {
                 $resp = Invoke-RestMethod -Uri "$($Script:CPRepoApi)/releases/latest" -TimeoutSec 10 -ErrorAction Stop
