@@ -265,7 +265,11 @@ _cp_do_update() {
     fi
     rm -rf "$_cp_upd_tmpdir"
 
-    printf 'Updating claude-profile.sh: v%s -> v%s\n' "$_cp_upd_installed" "$_cp_upd_latest"
+    case "$_cp_upd_installed" in
+        unknown) _cp_upd_installed_display="unknown" ;;
+        *) _cp_upd_installed_display="v${_cp_upd_installed}" ;;
+    esac
+    printf 'Updating claude-profile.sh: %s -> v%s\n' "$_cp_upd_installed_display" "$_cp_upd_latest"
     printf "Done. Run 'source ~/.bashrc' (or restart your shell) to use the new version.\\n"
     return 0
 }
@@ -341,8 +345,12 @@ _cp_update_check() {
     if [ "$_cp_cache_notified" = "0" ] && [ "$_cp_cache_ver" != "unknown" ]; then
         _cp_installed=$(_cp_installed_version)
         if _cp_version_lt "$_cp_installed" "$_cp_cache_ver"; then
-            printf "A new claude-profile version is available (v%s -> v%s). Run 'claude-profile update' to upgrade.\\n" \
-                "$_cp_installed" "$_cp_cache_ver" >&2
+            case "$_cp_installed" in
+                unknown) _cp_installed_display="unknown" ;;
+                *) _cp_installed_display="v${_cp_installed}" ;;
+            esac
+            printf "A new claude-profile version is available (%s -> v%s). Run 'claude-profile update' to upgrade.\\n" \
+                "$_cp_installed_display" "$_cp_cache_ver" >&2
             _cp_write_update_cache "$_cp_now" "$_cp_cache_ver" 1
         fi
     fi
