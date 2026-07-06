@@ -172,6 +172,7 @@ _cp_read_update_cache() {
             2) [ -n "$_cp_field" ] && _cp_cache_ver="$_cp_field" ;;
             3) case "$_cp_field" in 0|1) _cp_cache_notified="$_cp_field" ;; esac ;;
         esac
+        [ "$_cp_line_n" -ge 3 ] && break
     done < "$_cp_cache_file"
     return 0
 }
@@ -183,7 +184,10 @@ _cp_write_update_cache() {
     mkdir -p "$_cp_wuc_dir" 2>/dev/null || return 1
     _cp_wuc_file="${_cp_wuc_dir}/.update-check"
     _cp_wuc_tmp="${_cp_wuc_file}.tmp.$$"
-    printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$_cp_wuc_tmp" 2>/dev/null || return 1
+    if ! printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$_cp_wuc_tmp" 2>/dev/null; then
+        rm -f "$_cp_wuc_tmp" 2>/dev/null
+        return 1
+    fi
     mv -f "$_cp_wuc_tmp" "$_cp_wuc_file" 2>/dev/null || { rm -f "$_cp_wuc_tmp" 2>/dev/null; return 1; }
     return 0
 }
@@ -199,6 +203,7 @@ _cp_update_check() {
     _cp_read_update_cache
 
     _cp_now=$(date +%s 2>/dev/null) || return 0
+    case "$_cp_now" in ''|*[!0-9]*) return 0 ;; esac
     _cp_elapsed=$((_cp_now - _cp_cache_ts))
 
     if [ "$_cp_elapsed" -ge "$_CP_UPDATE_INTERVAL" ]; then
