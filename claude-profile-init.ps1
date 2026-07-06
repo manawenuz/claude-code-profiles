@@ -47,6 +47,18 @@ function Test-CPVersionLessThan {
 # --- Passive update check ---
 
 $Script:CPRepoApi = if ($env:CLAUDE_PROFILE_UPDATE_API_BASE) { $env:CLAUDE_PROFILE_UPDATE_API_BASE } else { 'https://api.github.com/repos/pegasusheavy/claude-code-profiles' }
+$Script:CPAssetBase = if ($env:CLAUDE_PROFILE_UPDATE_ASSET_BASE) { $env:CLAUDE_PROFILE_UPDATE_ASSET_BASE } else { 'https://github.com/pegasusheavy/claude-code-profiles/releases/download' }
+
+function Test-CPChecksum {
+    param([string]$FilePath, [string]$SumsPath)
+    $name = Split-Path $FilePath -Leaf
+    $line = (Get-Content $SumsPath -ErrorAction SilentlyContinue) | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
+    if (-not $line) { return $false }
+    $expected = ($line -split '\s+')[0]
+    $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash
+    return ($expected.ToLower() -eq $actual.ToLower())
+}
+
 $Script:CPUpdateInterval = 86400
 if ($env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL) {
     try { $Script:CPUpdateInterval = [long]$env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL }
@@ -394,6 +406,82 @@ function claude-profile {
             Write-Host (Get-CPInstalledVersion)
         }
 
+        'update' {
+            $Force = $args -contains '--force'
+
+            try {
+                $resp = Invoke-RestMethod -Uri "$($Script:CPRepoApi)/releases/latest" -TimeoutSec 10 -ErrorAction Stop
+            } catch {
+                _cp_die 'update failed: could not reach GitHub'
+                return
+            }
+            $latest = Get-CPTagVersion -Json ($resp | ConvertTo-Json -Compress)
+            if (-not $latest) {
+                _cp_die 'update failed: could not determine latest version'
+                return
+            }
+            $tag = "v$latest"
+
+            $installed = Get-CPInstalledVersion
+            if (-not $Force -and $installed -ne 'unknown' -and -not (Test-CPVersionLessThan -A $installed -B $latest)) {
+                _cp_die "already up to date (v$installed); latest is v$latest"
+                return
+            }
+
+            $installDir = Get-CPInstallDir
+            New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
+            # Temp dir is created INSIDE $installDir (not $env:TEMP) so the
+            # final Move-Item below is guaranteed to be a same-volume,
+            # atomic rename rather than a possible cross-volume copy+delete.
+            $tmpDir = Join-Path $installDir ".update-$PID"
+            try {
+                New-Item -ItemType Directory -Path $tmpDir -Force -ErrorAction Stop | Out-Null
+            } catch {
+                _cp_die "update failed: could not create temp directory: $_"
+                return
+            }
+            try {
+                $assetBase = "$($Script:CPAssetBase)/$tag"
+                try {
+                    Invoke-WebRequest -Uri "$assetBase/SHA256SUMS" -OutFile (Join-Path $tmpDir 'SHA256SUMS') -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$assetBase/VERSION" -OutFile (Join-Path $tmpDir 'VERSION') -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    Invoke-WebRequest -Uri "$assetBase/claude-profile-init.ps1" -OutFile (Join-Path $tmpDir 'claude-profile-init.ps1') -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+                } catch {
+                    _cp_die "update failed: download error: $_"
+                    return
+                }
+
+                $sumsFile = Join-Path $tmpDir 'SHA256SUMS'
+                if (-not (Test-CPChecksum -FilePath (Join-Path $tmpDir 'VERSION') -SumsPath $sumsFile)) {
+                    _cp_die 'update failed: VERSION checksum mismatch'
+                    return
+                }
+                if (-not (Test-CPChecksum -FilePath (Join-Path $tmpDir 'claude-profile-init.ps1') -SumsPath $sumsFile)) {
+                    _cp_die 'update failed: claude-profile-init.ps1 checksum mismatch'
+                    return
+                }
+
+                $downloadedVersion = (Get-Content (Join-Path $tmpDir 'VERSION') -Raw).Trim()
+                if ($downloadedVersion -ne $latest) {
+                    _cp_die "update failed: downloaded VERSION ($downloadedVersion) does not match release tag ($latest)"
+                    return
+                }
+
+                try {
+                    Move-Item -Path (Join-Path $tmpDir 'claude-profile-init.ps1') -Destination (Join-Path $installDir 'claude-profile-init.ps1') -Force -ErrorAction Stop
+                    Move-Item -Path (Join-Path $tmpDir 'VERSION') -Destination (Join-Path $installDir 'VERSION') -Force -ErrorAction Stop
+                } catch {
+                    _cp_die "update failed: could not replace installed files: $_"
+                    return
+                }
+
+                Write-Host "Updating claude-profile-init.ps1: v$installed -> v$latest"
+                Write-Host "Done. Run '. `$PROFILE' (or restart PowerShell) to use the new version."
+            } finally {
+                Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
         { $_ -eq 'help' -or $_ -eq '-h' -or $_ -eq '--help' } {
             Write-Host @"
 Usage: claude-profile [command] [args...]
@@ -406,6 +494,7 @@ Commands:
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
     version                 Show the installed version
+    update [--force]        Update to the latest release
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 
