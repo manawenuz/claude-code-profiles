@@ -22,8 +22,11 @@ function Get-CPInstallDir {
 function Get-CPInstalledVersion {
     $versionFile = Join-Path (Get-CPInstallDir) 'VERSION'
     if (Test-Path $versionFile) {
-        $v = (Get-Content $versionFile -Raw).Trim()
-        if ($v) { return $v }
+        $raw = Get-Content $versionFile -Raw -ErrorAction SilentlyContinue
+        if ($raw) {
+            $v = $raw.Trim()
+            if ($v) { return $v }
+        }
     }
     return 'unknown'
 }
