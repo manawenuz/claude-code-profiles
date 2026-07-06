@@ -331,7 +331,7 @@ _cp_warn_cache_write_failure() {
     case "$_cp_wcf_now" in ''|*[!0-9]*) return 0 ;; esac
     if [ $((_cp_wcf_now - _cp_wcf_last)) -ge "$_CP_UPDATE_INTERVAL" ]; then
         printf 'claude-profile: warning: could not write update-check cache in %s -- update notifications may not work until this is fixed\n' "$_cp_wcf_dir" >&2
-        printf '%s\n' "$_cp_wcf_now" > "$_cp_wcf_marker" 2>/dev/null
+        { printf '%s\n' "$_cp_wcf_now" > "$_cp_wcf_marker"; } 2>/dev/null
     fi
     return 0
 }
