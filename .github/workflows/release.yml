@@ -1,0 +1,47 @@
+name: Release
+
+# Automates what was previously a manual step (docs/plans/2026-07-06-auto-updater-plan.md,
+# Task 13): generate SHA256SUMS for the release-checksum-verified `claude-profile update`
+# command and attach it, alongside VERSION and the three scripts, as GitHub Release assets.
+#
+# Trigger: push a tag matching vX.Y.Z (after bumping VERSION to match, per the existing
+# release convention: bump VERSION, commit, tag, push).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify VERSION matches the pushed tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          file_version="$(cat VERSION)"
+          if [ "$tag_version" != "$file_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match VERSION file content '${file_version}'. Bump VERSION and re-tag before pushing."
+            exit 1
+          fi
+
+      - name: Generate checksums
+        run: ./scripts/make-release-checksums.sh > SHA256SUMS
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets=(VERSION claude-profile.sh claude-profile-init.ps1 claude-profile.cmd SHA256SUMS)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
