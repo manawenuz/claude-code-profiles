@@ -132,6 +132,7 @@ _cp_version_lt() {
 # --- Passive update check ---
 
 _CP_REPO_API="${CLAUDE_PROFILE_UPDATE_API_BASE:-https://api.github.com/repos/pegasusheavy/claude-code-profiles}"
+_CP_ASSET_BASE="${CLAUDE_PROFILE_UPDATE_ASSET_BASE:-https://github.com/pegasusheavy/claude-code-profiles/releases/download}"
 _CP_UPDATE_INTERVAL="${CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL:-86400}"
 case "$_CP_UPDATE_INTERVAL" in ''|*[!0-9]*) _CP_UPDATE_INTERVAL=86400 ;; esac
 
@@ -153,6 +154,120 @@ _cp_extract_tag_version() {
             return 1
             ;;
     esac
+}
+
+# Verifies a downloaded file's SHA-256 against a SHA256SUMS file. Usage:
+# _cp_verify_checksum <file> <sums-file>. Requires $_cp_sha_cmd to be set by
+# the caller (sha256sum or "shasum -a 256").
+_cp_verify_checksum() {
+    _cp_vc_file="$1"
+    _cp_vc_sums="$2"
+    _cp_vc_name=$(basename "$_cp_vc_file")
+    _cp_vc_expected=$(grep -F " ${_cp_vc_name}" "$_cp_vc_sums" 2>/dev/null | awk '{print $1}' | head -n1)
+    [ -n "$_cp_vc_expected" ] || return 1
+    _cp_vc_actual=$($_cp_sha_cmd "$_cp_vc_file" | awk '{print $1}')
+    [ "$_cp_vc_expected" = "$_cp_vc_actual" ]
+}
+
+# Fetches, checksum-verifies, and atomically replaces claude-profile.sh (and
+# the shared VERSION file) from the latest GitHub release. Exit status 0 on
+# success, 1 on any failure — never leaves a partial install in place.
+#
+# NOTE: deliberately does NOT use `trap ... EXIT` for temp-dir cleanup.
+# claude-profile.sh is sourced into a long-lived interactive shell, so a
+# trap set here would persist for the rest of the shell session and fire
+# at the wrong time. Cleanup is instead explicit at every return point,
+# matching this file's existing "no set -e" / no-trap discipline.
+_cp_do_update() {
+    _cp_upd_force=0
+    case "${1:-}" in
+        --force) _cp_upd_force=1 ;;
+        "") : ;;
+        *) _cp_die "usage: claude-profile update [--force]"; return 1 ;;
+    esac
+
+    command -v curl >/dev/null 2>&1 || { _cp_die "update requires curl"; return 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        _cp_sha_cmd="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        _cp_sha_cmd="shasum -a 256"
+    else
+        _cp_die "update requires sha256sum or shasum"
+        return 1
+    fi
+
+    _cp_upd_resp=$(curl -fsSL --connect-timeout 10 --max-time 30 "${_CP_REPO_API}/releases/latest" 2>/dev/null) || {
+        _cp_die "update failed: could not reach GitHub"
+        return 1
+    }
+    _cp_upd_tag=$(printf '%s' "$_cp_upd_resp" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -n1)
+    if [ -z "$_cp_upd_tag" ]; then
+        _cp_die "update failed: could not determine latest version"
+        return 1
+    fi
+    _cp_upd_latest="${_cp_upd_tag#v}"
+    case "$_cp_upd_latest" in
+        [0-9]*.[0-9]*.[0-9]*) : ;;
+        *) _cp_die "update failed: unexpected version format from GitHub"; return 1 ;;
+    esac
+
+    _cp_upd_installed=$(_cp_installed_version)
+    if [ "$_cp_upd_force" -eq 0 ] && [ "$_cp_upd_installed" != "unknown" ] \
+        && ! _cp_version_lt "$_cp_upd_installed" "$_cp_upd_latest"; then
+        _cp_die "already up to date (v${_cp_upd_installed}); latest is v${_cp_upd_latest}"
+        return 1
+    fi
+
+    _cp_upd_tmpdir=$(mktemp -d) || { _cp_die "update failed: could not create temp directory"; return 1; }
+    _cp_upd_base="${_CP_ASSET_BASE}/${_cp_upd_tag}"
+
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${_cp_upd_tmpdir}/SHA256SUMS" "${_cp_upd_base}/SHA256SUMS" 2>/dev/null; then
+        _cp_die "update failed: could not download checksums"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_base}/VERSION" 2>/dev/null; then
+        _cp_die "update failed: could not download VERSION"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_base}/claude-profile.sh" 2>/dev/null; then
+        _cp_die "update failed: could not download claude-profile.sh"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    if ! _cp_verify_checksum "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_tmpdir}/SHA256SUMS"; then
+        _cp_die "update failed: VERSION checksum mismatch"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    if ! _cp_verify_checksum "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_tmpdir}/SHA256SUMS"; then
+        _cp_die "update failed: claude-profile.sh checksum mismatch"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    _cp_upd_downloaded_version=$(cat "${_cp_upd_tmpdir}/VERSION")
+    if [ "$_cp_upd_downloaded_version" != "$_cp_upd_latest" ]; then
+        _cp_die "update failed: downloaded VERSION (${_cp_upd_downloaded_version}) does not match release tag (${_cp_upd_latest})"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+
+    _cp_upd_install="$(_cp_install_dir)"
+    mkdir -p "$_cp_upd_install" || { _cp_die "update failed: could not create install directory"; rm -rf "$_cp_upd_tmpdir"; return 1; }
+    if ! mv -f "${_cp_upd_tmpdir}/claude-profile.sh" "${_cp_upd_install}/claude-profile.sh"; then
+        _cp_die "update failed: could not replace claude-profile.sh"
+        rm -rf "$_cp_upd_tmpdir"
+        return 1
+    fi
+    mv -f "${_cp_upd_tmpdir}/VERSION" "${_cp_upd_install}/VERSION"
+    rm -rf "$_cp_upd_tmpdir"
+
+    printf 'Updating claude-profile.sh: v%s -> v%s\n' "$_cp_upd_installed" "$_cp_upd_latest"
+    printf "Done. Run 'source ~/.bashrc' (or restart your shell) to use the new version.\\n"
+    return 0
 }
 
 # Reads the update-check cache file into _cp_cache_ts / _cp_cache_ver /
@@ -522,6 +637,11 @@ SETTINGSEOF
             _cp_installed_version
             ;;
 
+        update)
+            shift
+            _cp_do_update "${1:-}"
+            ;;
+
         help|-h|--help)
             cat <<'HELPEOF'
 Usage: claude-profile [command] [args...]
@@ -534,6 +654,7 @@ Commands:
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
     version                 Show the installed version
+    update [--force]        Update to the latest release
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 
