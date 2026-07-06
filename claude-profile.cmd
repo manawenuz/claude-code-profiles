@@ -6,6 +6,10 @@ setlocal enabledelayedexpansion
 set "DATA_DIR=%LOCALAPPDATA%\claude-profiles"
 set "DEFAULT_FILE=%DATA_DIR%\.default"
 
+:: --- Version tracking ---
+set "_CP_INSTALL_DIR=%LOCALAPPDATA%\claude-profile"
+set "_CP_VERSION_FILE=%_CP_INSTALL_DIR%\VERSION"
+
 :: --- Dispatcher ---
 :: No arguments: launch with default profile
 if "%~1"=="" goto :cmd_launch_default
@@ -21,6 +25,7 @@ if "%~1"=="delete"  goto :dispatch_delete
 if "%~1"=="help"    goto :usage
 if "%~1"=="-h"      goto :usage
 if "%~1"=="--help"  goto :usage
+if "%~1"=="version" goto :dispatch_version
 
 :: Flags without a subcommand are not supported
 set "_first=%~1"
@@ -59,6 +64,10 @@ goto :cmd_use
 shift
 goto :cmd_delete
 
+:dispatch_version
+shift
+goto :cmd_version
+
 :: --- Usage ---
 
 :usage
@@ -72,6 +81,7 @@ echo     list, ls                List all profiles
 echo     default [name]          Get or set the default profile
 echo     delete ^<name^>           Delete a profile
 echo     which [name]            Show the resolved config directory path
+echo     version                 Show the installed version
 echo     help, -h, --help        Show this help message
 echo.
 echo Use 'call claude-profile use ^<name^>' to set CLAUDE_CONFIG_DIR in the
@@ -194,6 +204,13 @@ if not exist "%DATA_DIR%\" mkdir "%DATA_DIR%"
 :: Write profile name without trailing newline (cmd echo always adds one, but set /p reads the first line)
 >"%DEFAULT_FILE%" (echo|set /p="%~1")
 echo Default profile set to: %~1
+exit /b 0
+
+:cmd_version
+set "_cv_installed=unknown"
+if exist "%_CP_VERSION_FILE%" set /p _cv_installed=<"%_CP_VERSION_FILE%"
+if "!_cv_installed!"=="" set "_cv_installed=unknown"
+echo !_cv_installed!
 exit /b 0
 
 :cmd_which
