@@ -12,6 +12,8 @@ set "_CP_VERSION_FILE=%_CP_INSTALL_DIR%\VERSION"
 set "_CP_UPDATE_CACHE=%_CP_INSTALL_DIR%\.update-check"
 set "_CP_REPO_API=https://api.github.com/repos/pegasusheavy/claude-code-profiles"
 if defined CLAUDE_PROFILE_UPDATE_API_BASE set "_CP_REPO_API=%CLAUDE_PROFILE_UPDATE_API_BASE%"
+set "_CP_ASSET_BASE=https://github.com/pegasusheavy/claude-code-profiles/releases/download"
+if defined CLAUDE_PROFILE_UPDATE_ASSET_BASE set "_CP_ASSET_BASE=%CLAUDE_PROFILE_UPDATE_ASSET_BASE%"
 set "_CP_UPDATE_INTERVAL=86400"
 if defined CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL set "_CP_UPDATE_INTERVAL=%CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL%"
 echo %_CP_UPDATE_INTERVAL%| findstr /R "^[0-9][0-9]*$" >nul 2>&1 || set "_CP_UPDATE_INTERVAL=86400"
@@ -33,6 +35,7 @@ if "%~1"=="help"    goto :usage
 if "%~1"=="-h"      goto :usage
 if "%~1"=="--help"  goto :usage
 if "%~1"=="version" goto :dispatch_version
+if "%~1"=="update"  goto :dispatch_update
 
 :: Flags without a subcommand are not supported
 set "_first=%~1"
@@ -74,6 +77,10 @@ goto :cmd_delete
 :dispatch_version
 shift
 goto :cmd_version
+
+:dispatch_update
+shift
+goto :cmd_update
 
 :get_epoch
 :: cmd has no native epoch-time support; PowerShell ships with every
@@ -204,6 +211,7 @@ echo     default [name]          Get or set the default profile
 echo     delete ^<name^>           Delete a profile
 echo     which [name]            Show the resolved config directory path
 echo     version                 Show the installed version
+echo     update [--force]        Update to the latest release
 echo     help, -h, --help        Show this help message
 echo.
 echo Use 'call claude-profile use ^<name^>' to set CLAUDE_CONFIG_DIR in the
@@ -334,6 +342,153 @@ if exist "%_CP_VERSION_FILE%" set /p _cv_installed=<"%_CP_VERSION_FILE%"
 if "!_cv_installed!"=="" set "_cv_installed=unknown"
 echo !_cv_installed!
 exit /b 0
+
+:verify_checksum
+:: verify_checksum <file> <sums-file> -> errorlevel 0 on match, 1 otherwise
+set "_vc_file=%~1"
+set "_vc_sums=%~2"
+for %%F in ("!_vc_file!") do set "_vc_name=%%~nxF"
+set "_vc_actual="
+for /f "skip=1 tokens=* delims=" %%h in ('certutil -hashfile "!_vc_file!" SHA256 2^>nul') do (
+    if not defined _vc_actual (
+        echo %%h | findstr /R "^[0-9A-Fa-f][0-9A-Fa-f]*$" >nul 2>&1
+        if not errorlevel 1 set "_vc_actual=%%h"
+    )
+)
+set "_vc_expected="
+for /f "usebackq delims=" %%L in ("!_vc_sums!") do (
+    echo %%L | findstr /C:"!_vc_name!" >nul 2>&1
+    if not errorlevel 1 (
+        for /f "tokens=1" %%h in ("%%L") do set "_vc_expected=%%h"
+    )
+)
+if not defined _vc_expected exit /b 1
+if not defined _vc_actual exit /b 1
+if /i "!_vc_expected!"=="!_vc_actual!" (exit /b 0) else (exit /b 1)
+
+:cmd_update
+set "_cu_force=0"
+if /i "%~1"=="--force" set "_cu_force=1"
+
+where curl >nul 2>&1
+if errorlevel 1 (
+    echo claude-profile: update requires curl >&2
+    exit /b 1
+)
+
+set "_cu_resp=%TEMP%\cp-update-release-%RANDOM%.json"
+curl -fsSL --connect-timeout 10 --max-time 30 -o "!_cu_resp!" "%_CP_REPO_API%/releases/latest" >nul 2>&1
+if not exist "!_cu_resp!" (
+    echo claude-profile: update failed: could not reach GitHub >&2
+    exit /b 1
+)
+set "_cu_tagline="
+for /f "usebackq delims=" %%T in (`findstr /R "\"tag_name\"" "!_cu_resp!"`) do set "_cu_tagline=%%T"
+del /f /q "!_cu_resp!" >nul 2>&1
+if not defined _cu_tagline (
+    echo claude-profile: update failed: could not determine latest version >&2
+    exit /b 1
+)
+call :extract_tag_version "!_cu_tagline!"
+if not defined _cp_tag_version (
+    echo claude-profile: update failed: could not determine latest version >&2
+    exit /b 1
+)
+set "_cu_latest=!_cp_tag_version!"
+set "_cu_tag=v!_cu_latest!"
+
+set "_cu_installed=unknown"
+if exist "%_CP_VERSION_FILE%" set /p _cu_installed=<"%_CP_VERSION_FILE%"
+if "!_cu_installed!"=="" set "_cu_installed=unknown"
+:: Proactive fix (learned from Task 7's cp_update_check fix, commit 0d89002):
+:: validate the locally-installed VERSION file's content is a real X.Y.Z
+:: triplet before feeding it into version_lt, since a truncated/hand-edited
+:: file would otherwise silently mis-compare (version_lt's undefined-segment
+:: bug, also fixed in Task 7) instead of honestly falling back to "unknown".
+if not "!_cu_installed!"=="unknown" (
+    echo !_cu_installed!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+    if errorlevel 1 set "_cu_installed=unknown"
+)
+
+if "!_cu_force!"=="0" if not "!_cu_installed!"=="unknown" (
+    call :version_lt "!_cu_installed!" "!_cu_latest!"
+    if errorlevel 1 (
+        echo claude-profile: already up to date ^(v!_cu_installed!^); latest is v!_cu_latest! >&2
+        exit /b 1
+    )
+)
+
+:: Proactive fix (learned from Task 8/9's same-filesystem-tmpdir fix):
+:: create the install directory FIRST, then create the temp directory
+:: INSIDE it (not under %TEMP%), so the later `move` calls are guaranteed
+:: same-volume, atomic renames rather than a possible cross-volume
+:: copy+delete.
+if not exist "%_CP_INSTALL_DIR%" mkdir "%_CP_INSTALL_DIR%" >nul 2>&1
+set "_cu_tmpdir=%_CP_INSTALL_DIR%\.update-%RANDOM%"
+mkdir "!_cu_tmpdir!" >nul 2>&1
+if not exist "!_cu_tmpdir!\" (
+    echo claude-profile: update failed: could not create temp directory >&2
+    exit /b 1
+)
+
+set "_cu_asset_base=%_CP_ASSET_BASE%/!_cu_tag!"
+curl -fsSL --connect-timeout 10 --max-time 30 -o "!_cu_tmpdir!\SHA256SUMS" "!_cu_asset_base!/SHA256SUMS" >nul 2>&1
+curl -fsSL --connect-timeout 10 --max-time 30 -o "!_cu_tmpdir!\VERSION" "!_cu_asset_base!/VERSION" >nul 2>&1
+curl -fsSL --connect-timeout 10 --max-time 60 -o "!_cu_tmpdir!\claude-profile.cmd" "!_cu_asset_base!/claude-profile.cmd" >nul 2>&1
+
+if not exist "!_cu_tmpdir!\SHA256SUMS" (
+    echo claude-profile: update failed: could not download checksums >&2
+    goto :update_fail_cleanup
+)
+if not exist "!_cu_tmpdir!\VERSION" (
+    echo claude-profile: update failed: could not download VERSION >&2
+    goto :update_fail_cleanup
+)
+if not exist "!_cu_tmpdir!\claude-profile.cmd" (
+    echo claude-profile: update failed: could not download claude-profile.cmd >&2
+    goto :update_fail_cleanup
+)
+
+call :verify_checksum "!_cu_tmpdir!\VERSION" "!_cu_tmpdir!\SHA256SUMS"
+if errorlevel 1 (
+    echo claude-profile: update failed: VERSION checksum mismatch >&2
+    goto :update_fail_cleanup
+)
+call :verify_checksum "!_cu_tmpdir!\claude-profile.cmd" "!_cu_tmpdir!\SHA256SUMS"
+if errorlevel 1 (
+    echo claude-profile: update failed: claude-profile.cmd checksum mismatch >&2
+    goto :update_fail_cleanup
+)
+
+set "_cu_downloaded_version="
+set /p _cu_downloaded_version=<"!_cu_tmpdir!\VERSION"
+if not "!_cu_downloaded_version!"=="!_cu_latest!" (
+    echo claude-profile: update failed: downloaded VERSION ^(!_cu_downloaded_version!^) does not match release tag ^(!_cu_latest!^) >&2
+    goto :update_fail_cleanup
+)
+
+:: Proactive fix (learned from Task 8's unchecked-second-mv fix, commit
+:: 8cf1fca): both moves are now checked; a failure on either one cleans
+:: up and reports an error rather than silently reporting success.
+move /y "!_cu_tmpdir!\claude-profile.cmd" "%_CP_INSTALL_DIR%\claude-profile.cmd" >nul 2>&1
+if errorlevel 1 (
+    echo claude-profile: update failed: could not replace claude-profile.cmd >&2
+    goto :update_fail_cleanup
+)
+move /y "!_cu_tmpdir!\VERSION" "%_CP_VERSION_FILE%" >nul 2>&1
+if errorlevel 1 (
+    echo claude-profile: update failed: could not replace VERSION >&2
+    goto :update_fail_cleanup
+)
+rd /s /q "!_cu_tmpdir!" >nul 2>&1
+
+echo Updating claude-profile.cmd: v!_cu_installed! -^> v!_cu_latest!
+echo Done. Open a new cmd window ^(or re-run 'call claude-profile.cmd'^) to use the new version.
+exit /b 0
+
+:update_fail_cleanup
+if exist "!_cu_tmpdir!" rd /s /q "!_cu_tmpdir!" >nul 2>&1
+exit /b 1
 
 :cmd_which
 :: Resolve profile dir for optional name argument
