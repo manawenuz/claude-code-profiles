@@ -69,6 +69,60 @@ _cp_validate_name() {
     esac
 }
 
+# --- Version tracking helpers ---
+
+# Resolves the tool's own install directory (singular "claude-profile",
+# distinct from the plural "claude-profiles" data directory). Mirrors
+# _cp_data_dir's MSYS handling.
+_cp_install_dir() {
+    if _cp_is_msys && [ -n "${LOCALAPPDATA:-}" ] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -u "${LOCALAPPDATA}/claude-profile"
+        return 0
+    fi
+    printf '%s\n' "${XDG_DATA_HOME:-${HOME}/.local/share}/claude-profile"
+}
+
+# Reads the installed VERSION file; prints "unknown" if missing/empty.
+_cp_installed_version() {
+    _cp_ver_file="$(_cp_install_dir)/VERSION"
+    if [ -f "$_cp_ver_file" ]; then
+        _cp_ver=$(cat "$_cp_ver_file")
+        if [ -n "$_cp_ver" ]; then
+            printf '%s\n' "$_cp_ver"
+            return 0
+        fi
+    fi
+    printf 'unknown\n'
+}
+
+# Numeric MAJOR.MINOR.PATCH comparison. Usage: _cp_version_lt A B
+# Returns 0 (true, shell success) if A < B, 1 (false) otherwise.
+# "unknown" is always considered less than any real version, and equal to
+# itself.
+_cp_version_lt() {
+    _cp_vlt_a="$1"
+    _cp_vlt_b="$2"
+    if [ "$_cp_vlt_a" = "unknown" ]; then
+        [ "$_cp_vlt_b" = "unknown" ] && return 1
+        return 0
+    fi
+    [ "$_cp_vlt_b" = "unknown" ] && return 1
+    _cp_vlt_a1=$(printf '%s' "$_cp_vlt_a" | cut -d. -f1)
+    _cp_vlt_a2=$(printf '%s' "$_cp_vlt_a" | cut -d. -f2)
+    _cp_vlt_a3=$(printf '%s' "$_cp_vlt_a" | cut -d. -f3)
+    _cp_vlt_b1=$(printf '%s' "$_cp_vlt_b" | cut -d. -f1)
+    _cp_vlt_b2=$(printf '%s' "$_cp_vlt_b" | cut -d. -f2)
+    _cp_vlt_b3=$(printf '%s' "$_cp_vlt_b" | cut -d. -f3)
+    _cp_vlt_a1=${_cp_vlt_a1:-0}; _cp_vlt_a2=${_cp_vlt_a2:-0}; _cp_vlt_a3=${_cp_vlt_a3:-0}
+    _cp_vlt_b1=${_cp_vlt_b1:-0}; _cp_vlt_b2=${_cp_vlt_b2:-0}; _cp_vlt_b3=${_cp_vlt_b3:-0}
+    [ "$_cp_vlt_a1" -lt "$_cp_vlt_b1" ] && return 0
+    [ "$_cp_vlt_a1" -gt "$_cp_vlt_b1" ] && return 1
+    [ "$_cp_vlt_a2" -lt "$_cp_vlt_b2" ] && return 0
+    [ "$_cp_vlt_a2" -gt "$_cp_vlt_b2" ] && return 1
+    [ "$_cp_vlt_a3" -lt "$_cp_vlt_b3" ] && return 0
+    return 1
+}
+
 # --- claude() wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
@@ -352,6 +406,10 @@ SETTINGSEOF
             esac
             ;;
 
+        version)
+            _cp_installed_version
+            ;;
+
         help|-h|--help)
             cat <<'HELPEOF'
 Usage: claude-profile [command] [args...]
@@ -363,6 +421,7 @@ Commands:
     list, ls                List all profiles
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
+    version                 Show the installed version
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 
