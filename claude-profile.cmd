@@ -124,25 +124,6 @@ if !_vlt_a2! gtr !_vlt_b2! exit /b 1
 if !_vlt_a3! lss !_vlt_b3! exit /b 0
 exit /b 1
 
-:: write_update_cache <epoch> <version> <notified> — atomic via temp+rename.
-:: Signals success/failure via errorlevel (exit /b 0/1) so callers can
-:: detect persistent local cache I/O failures.
-:write_update_cache
-if not exist "%_CP_INSTALL_DIR%" mkdir "%_CP_INSTALL_DIR%" >nul 2>&1
-set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
-(
-    echo %~1
-    echo %~2
-    echo %~3
-) 2>nul >"!_wuc_tmp!"
-if not exist "!_wuc_tmp!" exit /b 1
-move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
-if errorlevel 1 (
-    del /f /q "!_wuc_tmp!" >nul 2>&1
-    exit /b 1
-)
-exit /b 0
-
 :: Rate-limited stderr diagnostic for persistent local cache-file I/O
 :: failures (permissions, disk full) -- distinct from transient network
 :: failures, which stay silent by design in :cp_update_check. Best-effort:
@@ -157,22 +138,71 @@ exit /b 0
 :: CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs the update
 :: check's own polling frequency. This is an accepted simplification, not
 :: a separate config knob (matches the sh/ps1 implementations' tradeoff).
+::
+:: Called from inside :write_update_cache (not from its callers) so the
+:: epoch it already received as %~1 is reused directly instead of a
+:: second `call :get_epoch` (a second powershell.exe spawn) -- this also
+:: means every current and future caller of :write_update_cache gets this
+:: diagnostic for free, with no risk of a call site forgetting to check
+:: the errorlevel.
+:: Usage: call :warn_cache_write_failure <epoch>
 :warn_cache_write_failure
+set "_wcf_now=%~1"
 set "_wcf_marker=%_CP_INSTALL_DIR%\.update-check-diag"
 set "_wcf_last=0"
 if exist "!_wcf_marker!" set /p _wcf_last=<"!_wcf_marker!"
 echo !_wcf_last!| findstr /R "^[0-9][0-9]*$" >nul 2>&1
 if errorlevel 1 set "_wcf_last=0"
-set "_wcf_saved_epoch=!_cp_epoch!"
-call :get_epoch
-set "_wcf_now=!_cp_epoch!"
-set "_cp_epoch=!_wcf_saved_epoch!"
 set /a _wcf_elapsed=_wcf_now-_wcf_last
 if !_wcf_elapsed! geq !_CP_UPDATE_INTERVAL! (
     echo claude-profile: warning: could not write update-check cache in %_CP_INSTALL_DIR% -- update notifications may not work until this is fixed >&2
-    2>nul >"!_wcf_marker!" echo !_wcf_now!
+    set "_wcf_tmp=!_wcf_marker!.tmp.%RANDOM%"
+    2>nul >"!_wcf_tmp!" echo !_wcf_now!
+    if exist "!_wcf_tmp!" (
+        move /y "!_wcf_tmp!" "!_wcf_marker!" >nul 2>&1
+        if errorlevel 1 del /f /q "!_wcf_tmp!" >nul 2>&1
+    )
 )
 goto :eof
+
+:: write_update_cache <epoch> <version> <notified> — atomic via temp+rename.
+:: Signals success/failure via errorlevel (exit /b 0/1) so callers can
+:: detect persistent local cache I/O failures; on failure it also invokes
+:: the rate-limited diagnostic above itself, so callers don't need to.
+:write_update_cache
+if not exist "%_CP_INSTALL_DIR%" mkdir "%_CP_INSTALL_DIR%" >nul 2>&1
+set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
+(
+    echo %~1
+    echo %~2
+    echo %~3
+) 2>nul >"!_wuc_tmp!"
+if not exist "!_wuc_tmp!" (
+    call :warn_cache_write_failure "%~1"
+    exit /b 1
+)
+:: A disk-full failure mid-write can leave a truncated-but-existing temp
+:: file, which `if exist` alone can't detect. Read back the third line
+:: and confirm it matches what we tried to write, catching truncation
+:: before it gets moved into place as the real cache file.
+set "_wuc_verify="
+set "_wuc_line=0"
+for /f "usebackq delims=" %%L in ("!_wuc_tmp!") do (
+    set /a _wuc_line+=1
+    if "!_wuc_line!"=="3" set "_wuc_verify=%%L"
+)
+if not "!_wuc_verify!"=="%~3" (
+    del /f /q "!_wuc_tmp!" >nul 2>&1
+    call :warn_cache_write_failure "%~1"
+    exit /b 1
+)
+move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
+if errorlevel 1 (
+    del /f /q "!_wuc_tmp!" >nul 2>&1
+    call :warn_cache_write_failure "%~1"
+    exit /b 1
+)
+exit /b 0
 
 :cp_update_check
 if defined CLAUDE_PROFILE_NO_UPDATE_CHECK goto :eof
@@ -210,12 +240,10 @@ if !_cpu_elapsed! geq !_CP_UPDATE_INTERVAL! (
     )
     if not "!_cpu_new_ver!"=="!_cpu_ver!" (
         call :write_update_cache "!_cp_epoch!" "!_cpu_new_ver!" "0"
-        if errorlevel 1 call :warn_cache_write_failure
         set "_cpu_ver=!_cpu_new_ver!"
         set "_cpu_notified=0"
     ) else (
         call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "!_cpu_notified!"
-        if errorlevel 1 call :warn_cache_write_failure
     )
 )
 
@@ -233,7 +261,6 @@ if "!_cpu_notified!"=="0" if not "!_cpu_ver!"=="unknown" (
         if "!_cpu_installed!"=="unknown" set "_cpu_installed_display=unknown"
         echo A new claude-profile version is available ^(!_cpu_installed_display! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
         call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "1"
-        if errorlevel 1 call :warn_cache_write_failure
     )
 )
 goto :eof
