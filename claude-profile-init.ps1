@@ -47,7 +47,11 @@ function Test-CPVersionLessThan {
 # --- Passive update check ---
 
 $Script:CPRepoApi = if ($env:CLAUDE_PROFILE_UPDATE_API_BASE) { $env:CLAUDE_PROFILE_UPDATE_API_BASE } else { 'https://api.github.com/repos/pegasusheavy/claude-code-profiles' }
-$Script:CPUpdateInterval = if ($env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL) { [long]$env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL } else { 86400 }
+$Script:CPUpdateInterval = 86400
+if ($env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL) {
+    try { $Script:CPUpdateInterval = [long]$env:CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL }
+    catch { }
+}
 
 function Get-CPTagVersion {
     param([string]$Json)
@@ -85,8 +89,8 @@ function Write-CPUpdateCache {
 }
 
 function Invoke-CPUpdateCheck {
-    if ($env:CLAUDE_PROFILE_NO_UPDATE_CHECK) { return }
     try {
+        if ($env:CLAUDE_PROFILE_NO_UPDATE_CHECK) { return }
         $cache = Read-CPUpdateCache
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 
