@@ -9,8 +9,15 @@ set "DEFAULT_FILE=%DATA_DIR%\.default"
 :: --- Version tracking ---
 set "_CP_INSTALL_DIR=%LOCALAPPDATA%\claude-profile"
 set "_CP_VERSION_FILE=%_CP_INSTALL_DIR%\VERSION"
+set "_CP_UPDATE_CACHE=%_CP_INSTALL_DIR%\.update-check"
+set "_CP_REPO_API=https://api.github.com/repos/pegasusheavy/claude-code-profiles"
+if defined CLAUDE_PROFILE_UPDATE_API_BASE set "_CP_REPO_API=%CLAUDE_PROFILE_UPDATE_API_BASE%"
+set "_CP_UPDATE_INTERVAL=86400"
+if defined CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL set "_CP_UPDATE_INTERVAL=%CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL%"
+echo %_CP_UPDATE_INTERVAL%| findstr /R "^[0-9][0-9]*$" >nul 2>&1 || set "_CP_UPDATE_INTERVAL=86400"
 
 :: --- Dispatcher ---
+call :cp_update_check
 :: No arguments: launch with default profile
 if "%~1"=="" goto :cmd_launch_default
 
@@ -67,6 +74,115 @@ goto :cmd_delete
 :dispatch_version
 shift
 goto :cmd_version
+
+:get_epoch
+:: cmd has no native epoch-time support; PowerShell ships with every
+:: supported Windows version, so shell out to it rather than reinventing
+:: date arithmetic in batch.
+set "_cp_epoch="
+for /f %%e in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()" 2^>nul') do set "_cp_epoch=%%e"
+if not defined _cp_epoch set "_cp_epoch=0"
+goto :eof
+
+:: extract_tag_version <raw findstr line containing "tag_name":"..."> ->
+:: sets _cp_tag_version (without leading v) on success, leaves it undefined
+:: on failure.
+:extract_tag_version
+set "_cp_tag_version="
+set "_etv_line=%~1"
+for /f "tokens=2 delims=:" %%v in ("!_etv_line!") do set "_etv_raw=%%v"
+set "_etv_raw=!_etv_raw:"=!"
+set "_etv_raw=!_etv_raw: =!"
+set "_etv_raw=!_etv_raw:,=!"
+if "!_etv_raw:~0,1!"=="v" set "_etv_raw=!_etv_raw:~1!"
+echo !_etv_raw!| findstr /R "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul 2>&1
+if not errorlevel 1 set "_cp_tag_version=!_etv_raw!"
+goto :eof
+
+:: version_lt <a> <b> -> errorlevel 0 if a<b, 1 otherwise.
+:: "unknown" is always < any real version, and equal to itself.
+:version_lt
+set "_vlt_a=%~1"
+set "_vlt_b=%~2"
+if "!_vlt_a!"=="unknown" (
+    if "!_vlt_b!"=="unknown" (exit /b 1) else (exit /b 0)
+)
+if "!_vlt_b!"=="unknown" exit /b 1
+for /f "tokens=1-3 delims=." %%x in ("!_vlt_a!") do (set "_vlt_a1=%%x" & set "_vlt_a2=%%y" & set "_vlt_a3=%%z")
+for /f "tokens=1-3 delims=." %%x in ("!_vlt_b!") do (set "_vlt_b1=%%x" & set "_vlt_b2=%%y" & set "_vlt_b3=%%z")
+if !_vlt_a1! lss !_vlt_b1! exit /b 0
+if !_vlt_a1! gtr !_vlt_b1! exit /b 1
+if !_vlt_a2! lss !_vlt_b2! exit /b 0
+if !_vlt_a2! gtr !_vlt_b2! exit /b 1
+if !_vlt_a3! lss !_vlt_b3! exit /b 0
+exit /b 1
+
+:: write_update_cache <epoch> <version> <notified> — atomic via temp+rename
+:write_update_cache
+if not exist "%_CP_INSTALL_DIR%" mkdir "%_CP_INSTALL_DIR%" >nul 2>&1
+set "_wuc_tmp=%_CP_UPDATE_CACHE%.tmp.%RANDOM%"
+(
+    echo %~1
+    echo %~2
+    echo %~3
+)>"!_wuc_tmp!" 2>nul
+if exist "!_wuc_tmp!" move /y "!_wuc_tmp!" "%_CP_UPDATE_CACHE%" >nul 2>&1
+goto :eof
+
+:cp_update_check
+if defined CLAUDE_PROFILE_NO_UPDATE_CHECK goto :eof
+where curl >nul 2>&1
+if errorlevel 1 goto :eof
+
+set "_cpu_ts=0"
+set "_cpu_ver=unknown"
+set "_cpu_notified=0"
+if exist "%_CP_UPDATE_CACHE%" (
+    set "_cpu_line=0"
+    for /f "usebackq delims=" %%L in ("%_CP_UPDATE_CACHE%") do (
+        set /a _cpu_line+=1
+        if "!_cpu_line!"=="1" set "_cpu_ts=%%L"
+        if "!_cpu_line!"=="2" set "_cpu_ver=%%L"
+        if "!_cpu_line!"=="3" set "_cpu_notified=%%L"
+    )
+)
+
+call :get_epoch
+set /a _cpu_elapsed=_cp_epoch-_cpu_ts
+
+if !_cpu_elapsed! geq !_CP_UPDATE_INTERVAL! (
+    set "_cpu_resp_file=%TEMP%\cp-release-%RANDOM%.json"
+    curl -fsSL --connect-timeout 3 --max-time 3 -o "!_cpu_resp_file!" "%_CP_REPO_API%/releases/latest" >nul 2>&1
+    set "_cpu_new_ver=!_cpu_ver!"
+    if exist "!_cpu_resp_file!" (
+        set "_cpu_tagline="
+        for /f "usebackq delims=" %%T in (`findstr /R "\"tag_name\"" "!_cpu_resp_file!"`) do set "_cpu_tagline=%%T"
+        del /f /q "!_cpu_resp_file!" >nul 2>&1
+        if defined _cpu_tagline (
+            call :extract_tag_version "!_cpu_tagline!"
+            if defined _cp_tag_version set "_cpu_new_ver=!_cp_tag_version!"
+        )
+    )
+    if not "!_cpu_new_ver!"=="!_cpu_ver!" (
+        call :write_update_cache "!_cp_epoch!" "!_cpu_new_ver!" "0"
+        set "_cpu_ver=!_cpu_new_ver!"
+        set "_cpu_notified=0"
+    ) else (
+        call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "!_cpu_notified!"
+    )
+)
+
+if "!_cpu_notified!"=="0" if not "!_cpu_ver!"=="unknown" (
+    set "_cpu_installed=unknown"
+    if exist "%_CP_VERSION_FILE%" set /p _cpu_installed=<"%_CP_VERSION_FILE%"
+    if "!_cpu_installed!"=="" set "_cpu_installed=unknown"
+    call :version_lt "!_cpu_installed!" "!_cpu_ver!"
+    if not errorlevel 1 (
+        echo A new claude-profile version is available ^(v!_cpu_installed! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
+        call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "1"
+    )
+)
+goto :eof
 
 :: --- Usage ---
 
