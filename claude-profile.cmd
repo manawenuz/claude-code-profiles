@@ -191,7 +191,9 @@ if "!_cpu_notified!"=="0" if not "!_cpu_ver!"=="unknown" (
     )
     call :version_lt "!_cpu_installed!" "!_cpu_ver!"
     if not errorlevel 1 (
-        echo A new claude-profile version is available ^(v!_cpu_installed! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
+        set "_cpu_installed_display=v!_cpu_installed!"
+        if "!_cpu_installed!"=="unknown" set "_cpu_installed_display=unknown"
+        echo A new claude-profile version is available ^(!_cpu_installed_display! -^> v!_cpu_ver!^). Run 'claude-profile update' to upgrade. >&2
         call :write_update_cache "!_cp_epoch!" "!_cpu_ver!" "1"
     )
 )
@@ -482,7 +484,9 @@ if errorlevel 1 (
 )
 rd /s /q "!_cu_tmpdir!" >nul 2>&1
 
-echo Updating claude-profile.cmd: v!_cu_installed! -^> v!_cu_latest!
+set "_cu_installed_display=v!_cu_installed!"
+if "!_cu_installed!"=="unknown" set "_cu_installed_display=unknown"
+echo Updating claude-profile.cmd: !_cu_installed_display! -^> v!_cu_latest!
 echo Done. Open a new cmd window ^(or re-run 'call claude-profile.cmd'^) to use the new version.
 exit /b 0
 
