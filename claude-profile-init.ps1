@@ -84,24 +84,6 @@ function Read-CPUpdateCache {
     return $result
 }
 
-# Atomic write: temp file + Move-Item, so a crash mid-write can't corrupt
-# the cache that every claude() invocation reads.
-function Write-CPUpdateCache {
-    param([long]$Timestamp, [string]$Version, [int]$Notified)
-    $installDir = Get-CPInstallDir
-    New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
-    $cacheFile = Join-Path $installDir '.update-check'
-    $tmpFile = "$cacheFile.tmp.$PID"
-    try {
-        Set-Content -Path $tmpFile -Value "$Timestamp`n$Version`n$Notified" -ErrorAction Stop
-        Move-Item -Path $tmpFile -Destination $cacheFile -Force -ErrorAction Stop
-        return $true
-    } catch {
-        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-}
-
 # Rate-limited stderr diagnostic for persistent local cache-file I/O
 # failures (permissions, disk full) -- distinct from transient network
 # failures, which stay silent by design in Invoke-CPUpdateCheck.
@@ -116,18 +98,48 @@ function Write-CPUpdateCache {
 # CLAUDE_PROFILE_UPDATE_CHECK_INTERVAL override that governs the update
 # check's own polling frequency. This is an accepted simplification, not
 # a separate config knob (matches the sh implementation's tradeoff).
+#
+# Called from inside Write-CPUpdateCache (not from its callers) so the
+# already-resolved install dir and timestamp are reused rather than
+# re-resolved -- this also means every current and future caller of
+# Write-CPUpdateCache gets this diagnostic for free, with no risk of a
+# call site forgetting to check the write's return value.
 function Write-CPCacheFailureDiagnostic {
-    $installDir = Get-CPInstallDir
-    $marker = Join-Path $installDir '.update-check-diag'
+    param([string]$InstallDir, [long]$Now)
+    $marker = Join-Path $InstallDir '.update-check-diag'
     $last = [long]0
     if (Test-Path $marker) {
         $raw = Get-Content $marker -Raw -ErrorAction SilentlyContinue
         if ($raw -and ($raw.Trim() -match '^\d+$')) { $last = [long]$raw.Trim() }
     }
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    if (($now - $last) -ge $Script:CPUpdateInterval) {
-        $host.UI.WriteErrorLine("claude-profile: warning: could not write update-check cache in $installDir -- update notifications may not work until this is fixed")
-        try { Set-Content -Path $marker -Value "$now" -ErrorAction Stop } catch { }
+    if (($Now - $last) -ge $Script:CPUpdateInterval) {
+        $host.UI.WriteErrorLine("claude-profile: warning: could not write update-check cache in $InstallDir -- update notifications may not work until this is fixed")
+        $tmpMarker = "$marker.tmp.$PID"
+        try {
+            Set-Content -Path $tmpMarker -Value "$Now" -ErrorAction Stop
+            Move-Item -Path $tmpMarker -Destination $marker -Force -ErrorAction Stop
+        } catch {
+            Remove-Item -Path $tmpMarker -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Atomic write: temp file + Move-Item, so a crash mid-write can't corrupt
+# the cache that every claude() invocation reads.
+function Write-CPUpdateCache {
+    param([long]$Timestamp, [string]$Version, [int]$Notified)
+    $installDir = Get-CPInstallDir
+    New-Item -ItemType Directory -Path $installDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $cacheFile = Join-Path $installDir '.update-check'
+    $tmpFile = "$cacheFile.tmp.$PID"
+    try {
+        Set-Content -Path $tmpFile -Value "$Timestamp`n$Version`n$Notified" -ErrorAction Stop
+        Move-Item -Path $tmpFile -Destination $cacheFile -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+        Write-CPCacheFailureDiagnostic -InstallDir $installDir -Now $Timestamp
+        return $false
     }
 }
 
@@ -147,11 +159,11 @@ function Invoke-CPUpdateCheck {
                 # network/API failure: silently keep the previous cached version
             }
             if ($newVer -ne $cache.Version) {
-                if (-not (Write-CPUpdateCache -Timestamp $now -Version $newVer -Notified 0)) { Write-CPCacheFailureDiagnostic }
+                Write-CPUpdateCache -Timestamp $now -Version $newVer -Notified 0 | Out-Null
                 $cache.Version = $newVer
                 $cache.Notified = 0
             } else {
-                if (-not (Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified $cache.Notified)) { Write-CPCacheFailureDiagnostic }
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified $cache.Notified | Out-Null
             }
         }
 
@@ -160,7 +172,7 @@ function Invoke-CPUpdateCheck {
             if (Test-CPVersionLessThan -A $installed -B $cache.Version) {
                 $installedDisplay = if ($installed -eq 'unknown') { 'unknown' } else { "v$installed" }
                 $host.UI.WriteErrorLine("A new claude-profile version is available ($installedDisplay -> v$($cache.Version)). Run 'claude-profile update' to upgrade.")
-                if (-not (Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified 1)) { Write-CPCacheFailureDiagnostic }
+                Write-CPUpdateCache -Timestamp $now -Version $cache.Version -Notified 1 | Out-Null
             }
         }
     } catch {
