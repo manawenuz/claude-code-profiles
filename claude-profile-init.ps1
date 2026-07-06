@@ -7,6 +7,40 @@
 #   claude           — runs Claude Code with the active/default profile
 #   claude-profile   — manage profiles (create, list, delete, default, use, which)
 
+# --- Version tracking helpers ---
+
+function Get-CPInstallDir {
+    if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+        return Join-Path $env:LOCALAPPDATA 'claude-profile'
+    }
+    if ($env:XDG_DATA_HOME) {
+        return Join-Path $env:XDG_DATA_HOME 'claude-profile'
+    }
+    return Join-Path $HOME '.local' 'share' 'claude-profile'
+}
+
+function Get-CPInstalledVersion {
+    $versionFile = Join-Path (Get-CPInstallDir) 'VERSION'
+    if (Test-Path $versionFile) {
+        $v = (Get-Content $versionFile -Raw).Trim()
+        if ($v) { return $v }
+    }
+    return 'unknown'
+}
+
+# Numeric MAJOR.MINOR.PATCH comparison. "unknown" is always less than any
+# real version, and equal to itself.
+function Test-CPVersionLessThan {
+    param([string]$A, [string]$B)
+    if ($A -eq 'unknown') { return ($B -ne 'unknown') }
+    if ($B -eq 'unknown') { return $false }
+    try {
+        return ([version]$A) -lt ([version]$B)
+    } catch {
+        return $false
+    }
+}
+
 # --- claude wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
@@ -272,6 +306,10 @@ function claude-profile {
             }
         }
 
+        'version' {
+            Write-Host (Get-CPInstalledVersion)
+        }
+
         { $_ -eq 'help' -or $_ -eq '-h' -or $_ -eq '--help' } {
             Write-Host @"
 Usage: claude-profile [command] [args...]
@@ -283,6 +321,7 @@ Commands:
     list, ls                List all profiles
     default [name]          Get or set the default profile
     which [name]            Show the resolved config directory path
+    version                 Show the installed version
     delete <name>           Delete a profile
     help, -h, --help        Show this help message
 
