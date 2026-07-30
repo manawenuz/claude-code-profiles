@@ -31,9 +31,21 @@ All three implementations share the same command interface:
 | `claude-profile create <name>` | Create a new profile |
 | `claude-profile list` | List all profiles (marks default and active) |
 | `claude-profile default [name]` | Get or set the default profile |
+| `claude-profile local [name]` | Show, set, or `--remove` the directory-local `.claude-profile` |
+| `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (sh/ps1 only) |
 | `claude-profile which [name]` | Show the resolved config directory path |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile help` | Show help |
+
+## Directory-Local Profiles
+
+A `.claude-profile` file (first non-empty, non-comment line = profile name) switches `CLAUDE_CONFIG_DIR` when the shell enters that directory or any descendant, and reverts on leaving. An explicit `claude-profile use` pins the session and wins until `claude-profile auto on`.
+
+The pin is tracked via an exported `CLAUDE_PROFILE_AUTO_SET` marker: auto-switching only manages `CLAUDE_CONFIG_DIR` when its value equals that marker, so anything set by hand (or inherited from outside) is left alone. Exporting it means nested shells keep auto-managing rather than treating the inherited value as manual.
+
+Directory-change hooks differ per shell: zsh `chpwd`, bash `PROMPT_COMMAND`, `cd` wrapper elsewhere; PowerShell 6+ `LocationChangedAction`, PowerShell 5.1 `prompt` wrapper. cmd.exe has no hook — a bare `call claude-profile.cmd` resolves the dotfile at invocation time instead.
+
+Because bash re-runs the resolver on every prompt, `_cp_auto_switch` short-circuits when `$PWD` is unchanged and the upward walk uses only parameter expansion (no `dirname` fork per component). That short-circuit also rate-limits the "invalid/missing profile" warnings to once per directory entry.
 
 ## Validation Rules
 
