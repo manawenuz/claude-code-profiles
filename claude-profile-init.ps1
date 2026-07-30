@@ -19,6 +19,16 @@ function Get-CPInstallDir {
     return Join-Path $HOME '.local' 'share' 'claude-profile'
 }
 
+function Get-CPDataDir {
+    if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+        return Join-Path $env:LOCALAPPDATA 'claude-profiles'
+    }
+    if ($env:XDG_DATA_HOME) {
+        return Join-Path $env:XDG_DATA_HOME 'claude-profiles'
+    }
+    return Join-Path $HOME '.local' 'share' 'claude-profiles'
+}
+
 function Get-CPInstalledVersion {
     $versionFile = Join-Path (Get-CPInstallDir) 'VERSION'
     if (Test-Path $versionFile) {
@@ -180,6 +190,157 @@ function Invoke-CPUpdateCheck {
     }
 }
 
+# --- Directory-local profile (.claude-profile) auto-switching ---
+#
+# A directory may contain a `.claude-profile` file whose first non-empty,
+# non-comment line names a profile. Entering that directory (or any
+# descendant) switches CLAUDE_CONFIG_DIR to it; leaving reverts to the
+# default. An explicit `claude-profile use <name>` pins the session and
+# suppresses auto-switching until `claude-profile auto on`.
+#
+# Environment knobs:
+#   CLAUDE_PROFILE_NO_AUTO_SWITCH=1   disable auto-switching entirely
+#   CLAUDE_PROFILE_AUTO_QUIET=1       switch silently (no stderr notices)
+#
+# CLAUDE_PROFILE_AUTO_SET is an environment variable (not a script variable)
+# so nested shells know the current CLAUDE_CONFIG_DIR came from
+# auto-switching rather than from an explicit `use`.
+
+$Script:CPDotfileName = '.claude-profile'
+
+function Write-CPAutoNotice {
+    param([string]$Message)
+    if ($env:CLAUDE_PROFILE_AUTO_QUIET) { return }
+    $host.UI.WriteErrorLine("claude-profile: $Message")
+}
+
+# Returns the path of the nearest .claude-profile at or above $StartDir, or
+# $null when none exists.
+function Find-CPDotfile {
+    param([string]$StartDir)
+    if (-not $StartDir) { return $null }
+    try {
+        $dir = Get-Item -LiteralPath $StartDir -Force -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    while ($dir) {
+        $candidate = Join-Path $dir.FullName $Script:CPDotfileName
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        $dir = $dir.Parent
+    }
+    return $null
+}
+
+# Returns the first non-empty, non-comment line of $Path, trimmed, or $null.
+function Read-CPDotfile {
+    param([string]$Path)
+    try {
+        $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith('#')) { continue }
+        return $trimmed
+    }
+    return $null
+}
+
+# Returns the current filesystem directory, or $null when the session is on a
+# non-filesystem provider (Registry:, Cert:, ...) where .claude-profile has no
+# meaning.
+function Get-CPCurrentFileSystemPath {
+    $loc = Get-Location
+    if ($loc.Provider.Name -ne 'FileSystem') { return $null }
+    return $loc.ProviderPath
+}
+
+# Resolves and applies the directory-local profile for the current directory.
+# Safe to call repeatedly: it short-circuits when the directory hasn't
+# changed, which also rate-limits the warnings below to once per directory
+# entry rather than once per prompt.
+function Invoke-CPAutoSwitch {
+    try {
+        if ($env:CLAUDE_PROFILE_NO_AUTO_SWITCH) { return }
+        if ($Script:CPAutoOff) { return }
+        $cwd = Get-CPCurrentFileSystemPath
+        if (-not $cwd) { return }
+        if ($cwd -eq $Script:CPAutoLastPwd) { return }
+        $Script:CPAutoLastPwd = $cwd
+
+        # An explicitly-chosen profile (claude-profile use, or a
+        # CLAUDE_CONFIG_DIR inherited from outside) wins over .claude-profile.
+        if ($env:CLAUDE_CONFIG_DIR -and ($env:CLAUDE_CONFIG_DIR -ne $env:CLAUDE_PROFILE_AUTO_SET)) { return }
+
+        $dotfile = Find-CPDotfile -StartDir $cwd
+        $name = if ($dotfile) { Read-CPDotfile -Path $dotfile } else { $null }
+
+        if (-not $name) {
+            if ($env:CLAUDE_PROFILE_AUTO_SET) {
+                Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+                Remove-Item Env:\CLAUDE_PROFILE_AUTO_SET -ErrorAction SilentlyContinue
+                Write-CPAutoNotice 'directory profile cleared; using the default profile'
+            }
+            if ($dotfile) {
+                $host.UI.WriteErrorLine("claude-profile: ignoring ${dotfile}: no profile name in file")
+            }
+            return
+        }
+
+        if ($name -notmatch '^[A-Za-z0-9_-]+$') {
+            $host.UI.WriteErrorLine("claude-profile: ignoring ${dotfile}: invalid profile name '$name'")
+            return
+        }
+
+        $profileDir = Join-Path (Get-CPDataDir) $name
+        if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) {
+            $host.UI.WriteErrorLine("claude-profile: ignoring ${dotfile}: profile '$name' does not exist")
+            return
+        }
+
+        if ($env:CLAUDE_CONFIG_DIR -ne $profileDir) {
+            $env:CLAUDE_CONFIG_DIR = $profileDir
+            Write-CPAutoNotice "profile '$name' (from $dotfile)"
+        }
+        $env:CLAUDE_PROFILE_AUTO_SET = $profileDir
+    } catch {
+        # Never let auto-switching break the prompt.
+    }
+}
+
+# Registers Invoke-CPAutoSwitch with whatever directory-change mechanism the
+# running host offers. PowerShell 6+ has a real LocationChangedAction hook;
+# Windows PowerShell 5.1 only has the prompt function. Both paths are guarded
+# so re-dot-sourcing this file can't chain a handler into itself.
+if (-not $Script:CPLocationHookInstalled) {
+    if ($ExecutionContext.InvokeCommand.PSObject.Properties.Name -contains 'LocationChangedAction') {
+        $Script:CPPrevLocationAction = $ExecutionContext.InvokeCommand.LocationChangedAction
+        $ExecutionContext.InvokeCommand.LocationChangedAction = {
+            param($EventSender, $EventArgs)
+            if ($Script:CPPrevLocationAction) { & $Script:CPPrevLocationAction $EventSender $EventArgs }
+            Invoke-CPAutoSwitch
+        }
+    } else {
+        $Script:CPPrevPrompt = $function:prompt
+        function global:prompt {
+            Invoke-CPAutoSwitch
+            if ($Script:CPPrevPrompt) {
+                & $Script:CPPrevPrompt
+            } else {
+                "PS $($ExecutionContext.SessionState.Path.CurrentLocation)$('>' * ($NestedPromptLevel + 1)) "
+            }
+        }
+    }
+    $Script:CPLocationHookInstalled = $true
+}
+
+# Resolve once at load time so a session started inside a .claude-profile
+# tree is already on the right profile.
+Invoke-CPAutoSwitch
+
 # --- claude wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
@@ -187,22 +348,21 @@ function Invoke-CPUpdateCheck {
 
 function claude {
     Invoke-CPUpdateCheck
+    # Covers directory changes the hook above may have missed.
+    Invoke-CPAutoSwitch
     if (-not $env:CLAUDE_CONFIG_DIR) {
-        if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
-            $DataDir = Join-Path $env:LOCALAPPDATA 'claude-profiles'
-        } else {
-            if ($env:XDG_DATA_HOME) {
-                $DataDir = Join-Path $env:XDG_DATA_HOME 'claude-profiles'
-            } else {
-                $DataDir = Join-Path $HOME '.local' 'share' 'claude-profiles'
-            }
-        }
+        $DataDir = Get-CPDataDir
         $DefaultFile = Join-Path $DataDir '.default'
         if (Test-Path $DefaultFile) {
             $Name = (Get-Content $DefaultFile -Raw).Trim()
             $ProfilePath = Join-Path $DataDir $Name
             if ($Name -and (Test-Path $ProfilePath -PathType Container)) {
                 $env:CLAUDE_CONFIG_DIR = $ProfilePath
+                # Mark it auto-managed, not an explicit pin: without this, the
+                # first `claude` run would freeze the session on the default
+                # profile and later .claude-profile directories would be
+                # ignored.
+                $env:CLAUDE_PROFILE_AUTO_SET = $ProfilePath
             }
         }
     }
@@ -221,15 +381,7 @@ function claude-profile {
     $ErrorActionPreference = 'Stop'
 
     # --- Platform-aware data directory ---
-    if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
-        $DataDir = Join-Path $env:LOCALAPPDATA 'claude-profiles'
-    } else {
-        if ($env:XDG_DATA_HOME) {
-            $DataDir = Join-Path $env:XDG_DATA_HOME 'claude-profiles'
-        } else {
-            $DataDir = Join-Path $HOME '.local' 'share' 'claude-profiles'
-        }
-    }
+    $DataDir = Get-CPDataDir
     $DefaultFile = Join-Path $DataDir '.default'
 
     # --- Parse $args manually ---
@@ -291,7 +443,105 @@ function claude-profile {
                 return
             }
             $env:CLAUDE_CONFIG_DIR = $ProfileDir
+            # Dropping the auto-set marker pins the session: subsequent
+            # directory changes will no longer override this choice.
+            Remove-Item Env:\CLAUDE_PROFILE_AUTO_SET -ErrorAction SilentlyContinue
             Write-Host "Switched to profile: $ArgName"
+        }
+
+        'auto' {
+            # Defaulted to 'status' rather than $null so the inner switch has a
+            # real value to match on.
+            $Sub = if ($args.Count -gt 1) { $args[1] } else { 'status' }
+            switch ($Sub) {
+                'on' {
+                    $Script:CPAutoOff = $false
+                    Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue
+                    Remove-Item Env:\CLAUDE_PROFILE_AUTO_SET -ErrorAction SilentlyContinue
+                    $Script:CPAutoLastPwd = $null
+                    Invoke-CPAutoSwitch
+                    Write-Host 'Directory-local auto-switching enabled.'
+                }
+                'off' {
+                    $Script:CPAutoOff = $true
+                    Write-Host 'Directory-local auto-switching disabled for this session.'
+                }
+                'status' {
+                    if ($env:CLAUDE_PROFILE_NO_AUTO_SWITCH) {
+                        Write-Host 'Auto-switching: disabled (CLAUDE_PROFILE_NO_AUTO_SWITCH is set)'
+                    } elseif ($Script:CPAutoOff) {
+                        Write-Host 'Auto-switching: disabled for this session'
+                    } elseif ($env:CLAUDE_CONFIG_DIR -and ($env:CLAUDE_CONFIG_DIR -ne $env:CLAUDE_PROFILE_AUTO_SET)) {
+                        Write-Host 'Auto-switching: pinned (an explicit profile is active)'
+                        Write-Host "Run 'claude-profile auto on' to resume auto-switching."
+                    } else {
+                        Write-Host 'Auto-switching: enabled'
+                    }
+                    $Dotfile = Find-CPDotfile -StartDir (Get-CPCurrentFileSystemPath)
+                    if ($Dotfile) {
+                        $DotName = Read-CPDotfile -Path $Dotfile
+                        if (-not $DotName) { $DotName = '<empty>' }
+                        Write-Host "Directory profile: $DotName ($Dotfile)"
+                    } else {
+                        Write-Host 'Directory profile: none in scope'
+                    }
+                }
+                default {
+                    _cp_die 'usage: claude-profile auto [on|off|status]'
+                    return
+                }
+            }
+        }
+
+        'local' {
+            $Sub = if ($args.Count -gt 1) { $args[1] } else { $null }
+            $Cwd = Get-CPCurrentFileSystemPath
+            if (-not $Cwd) {
+                _cp_die 'the current location is not a filesystem directory'
+                return
+            }
+            $LocalFile = Join-Path $Cwd $Script:CPDotfileName
+            if (-not $Sub) {
+                $Dotfile = Find-CPDotfile -StartDir $Cwd
+                if (-not $Dotfile) {
+                    _cp_die "no $($Script:CPDotfileName) found in this directory or any parent"
+                    return
+                }
+                $DotName = Read-CPDotfile -Path $Dotfile
+                if (-not $DotName) { $DotName = '<empty>' }
+                Write-Host $Dotfile
+                Write-Host "Profile: $DotName"
+                return
+            }
+            if ($Sub -eq '--remove' -or $Sub -eq '--clear') {
+                if (-not (Test-Path -LiteralPath $LocalFile -PathType Leaf)) {
+                    _cp_die "no $($Script:CPDotfileName) in the current directory"
+                    return
+                }
+                Remove-Item -LiteralPath $LocalFile -Force
+                Write-Host "Removed $LocalFile"
+                $Script:CPAutoLastPwd = $null
+                Invoke-CPAutoSwitch
+                return
+            }
+            if ($Sub.StartsWith('-')) {
+                _cp_die "unknown option '$Sub'"
+                return
+            }
+            if ($args.Count -gt 2) {
+                _cp_die "unexpected argument after profile name: '$($args[2])'"
+                return
+            }
+            if (-not (_cp_validate_name $Sub)) { return }
+            $ProfileDir = Join-Path $DataDir $Sub
+            if (-not (Test-Path $ProfileDir -PathType Container)) {
+                _cp_die "profile '$Sub' does not exist. Create it with: claude-profile create $Sub"
+                return
+            }
+            [System.IO.File]::WriteAllText($LocalFile, "$Sub`n")
+            Write-Host "Wrote $LocalFile (profile: $Sub)"
+            $Script:CPAutoLastPwd = $null
+            Invoke-CPAutoSwitch
         }
 
         'create' {
@@ -533,10 +783,13 @@ Usage: claude-profile [command] [args...]
 
 Commands:
     (no command)            Show current profile status
-    use <name>              Switch session to the named profile
+    use <name>              Switch session to the named profile (pins it)
     create <name>           Create a new profile
     list, ls                List all profiles
     default [name]          Get or set the default profile
+    local [name]            Show, set (.claude-profile), or --remove the
+                            directory-local profile for the current directory
+    auto [on|off|status]    Control directory-local auto-switching
     which [name]            Show the resolved config directory path
     version                 Show the installed version
     update [--force]        Update to the latest release
@@ -546,12 +799,21 @@ Commands:
 The claude command automatically uses the default profile. Use
 'claude-profile use <name>' to override for the current session.
 
+A directory containing a .claude-profile file (holding a profile name)
+switches the session to that profile on Set-Location, and reverts on
+leaving. An explicit 'claude-profile use' pins the session and wins over
+any .claude-profile until 'claude-profile auto on'. Set
+CLAUDE_PROFILE_NO_AUTO_SWITCH=1 to disable, CLAUDE_PROFILE_AUTO_QUIET=1
+to switch silently.
+
 Examples:
     claude-profile create work
     claude-profile default work
     claude-profile use work
     claude                          # runs with "work" profile
     claude-profile                  # shows active/default status
+    claude-profile local work       # pin this directory tree to "work"
+    claude-profile local --remove   # drop the directory-local profile
 "@
         }
 
@@ -566,7 +828,15 @@ Examples:
                 }
             }
             if ($Active) {
-                Write-Host "Active profile: $Active"
+                $Dotfile = $null
+                if ($env:CLAUDE_CONFIG_DIR -eq $env:CLAUDE_PROFILE_AUTO_SET) {
+                    $Dotfile = Find-CPDotfile -StartDir (Get-CPCurrentFileSystemPath)
+                }
+                if ($Dotfile) {
+                    Write-Host "Active profile: $Active (from $Dotfile)"
+                } else {
+                    Write-Host "Active profile: $Active"
+                }
                 Write-Host "Config directory: $env:CLAUDE_CONFIG_DIR"
             } elseif ($env:CLAUDE_CONFIG_DIR) {
                 Write-Host "Active config directory: $env:CLAUDE_CONFIG_DIR (not a managed profile)"

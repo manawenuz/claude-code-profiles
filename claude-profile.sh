@@ -409,6 +409,152 @@ _cp_update_check() {
     return 0
 }
 
+# --- Directory-local profile (.claude-profile) auto-switching ---
+#
+# A directory may contain a `.claude-profile` file whose first non-empty,
+# non-comment line names a profile. Entering that directory (or any
+# descendant) switches CLAUDE_CONFIG_DIR to it; leaving reverts to the
+# default. Explicit `claude-profile use <name>` pins the session and
+# suppresses auto-switching until `claude-profile auto on`.
+#
+# Environment knobs:
+#   CLAUDE_PROFILE_NO_AUTO_SWITCH=1   disable auto-switching entirely
+#   CLAUDE_PROFILE_AUTO_QUIET=1       switch silently (no stderr notices)
+#
+# CLAUDE_PROFILE_AUTO_SET is exported so nested shells know the current
+# CLAUDE_CONFIG_DIR came from auto-switching (and may be re-managed) rather
+# than from an explicit `use`.
+
+_CP_DOTFILE=".claude-profile"
+_CP_CR=$(printf '\r')
+
+_cp_auto_notice() {
+    [ -n "${CLAUDE_PROFILE_AUTO_QUIET:-}" ] && return 0
+    printf 'claude-profile: %s\n' "$1" >&2
+    return 0
+}
+
+# Sets _cp_dotfile to the nearest .claude-profile at or above directory $1,
+# or empty when none is found. Deliberately uses only parameter expansion
+# (no dirname/basename subprocesses): this runs on every shell prompt under
+# bash's PROMPT_COMMAND, so a fork per path component would be felt.
+_cp_find_dotfile() {
+    _cp_dotfile=""
+    _cp_fd_dir="$1"
+    while :; do
+        [ -n "$_cp_fd_dir" ] || _cp_fd_dir="/"
+        if [ -f "${_cp_fd_dir%/}/${_CP_DOTFILE}" ]; then
+            _cp_dotfile="${_cp_fd_dir%/}/${_CP_DOTFILE}"
+            return 0
+        fi
+        [ "$_cp_fd_dir" = "/" ] && break
+        _cp_fd_dir="${_cp_fd_dir%/*}"
+    done
+    return 1
+}
+
+# Sets _cp_dotname to the first non-empty, non-comment line of file $1,
+# with surrounding whitespace and any trailing CR stripped (so a file
+# authored on Windows and used from WSL/Git Bash still resolves).
+_cp_read_dotfile() {
+    _cp_dotname=""
+    while IFS= read -r _cp_rd_line || [ -n "$_cp_rd_line" ]; do
+        _cp_rd_line="${_cp_rd_line%"$_CP_CR"}"
+        while :; do
+            case "$_cp_rd_line" in
+                " "*|"	"*) _cp_rd_line="${_cp_rd_line#?}" ;;
+                *" "|*"	") _cp_rd_line="${_cp_rd_line%?}" ;;
+                *) break ;;
+            esac
+        done
+        case "$_cp_rd_line" in
+            ''|'#'*) continue ;;
+        esac
+        _cp_dotname="$_cp_rd_line"
+        return 0
+    done < "$1"
+    return 1
+}
+
+# Resolves and applies the directory-local profile for $PWD. Safe to call
+# repeatedly: it short-circuits when the directory hasn't changed, which
+# also rate-limits the warnings below to once per directory entry rather
+# than once per prompt.
+_cp_auto_switch() {
+    [ -n "${CLAUDE_PROFILE_NO_AUTO_SWITCH:-}" ] && return 0
+    [ "${_CP_AUTO_OFF:-0}" = "1" ] && return 0
+    [ "${PWD:-}" = "${_CP_AUTO_LAST_PWD:-}" ] && return 0
+    _CP_AUTO_LAST_PWD="${PWD:-}"
+
+    # An explicitly-chosen profile (claude-profile use, or a CLAUDE_CONFIG_DIR
+    # inherited from outside) wins over any .claude-profile file.
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$CLAUDE_CONFIG_DIR" != "${CLAUDE_PROFILE_AUTO_SET:-}" ]; then
+        return 0
+    fi
+
+    _cp_dotname=""
+    if _cp_find_dotfile "${PWD:-}"; then
+        _cp_read_dotfile "$_cp_dotfile"
+    fi
+
+    if [ -z "$_cp_dotname" ]; then
+        if [ -n "${CLAUDE_PROFILE_AUTO_SET:-}" ]; then
+            unset CLAUDE_CONFIG_DIR
+            unset CLAUDE_PROFILE_AUTO_SET
+            _cp_auto_notice "directory profile cleared; using the default profile"
+        fi
+        [ -n "$_cp_dotfile" ] && _cp_die "ignoring ${_cp_dotfile}: no profile name in file"
+        return 0
+    fi
+
+    case "$_cp_dotname" in
+        .*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
+            _cp_die "ignoring ${_cp_dotfile}: invalid profile name '${_cp_dotname}'"
+            return 1
+            ;;
+    esac
+
+    [ -n "${_CP_DATA_CACHE:-}" ] || _CP_DATA_CACHE=$(_cp_data_dir)
+    _cp_as_dir="${_CP_DATA_CACHE}/${_cp_dotname}"
+    if [ ! -d "$_cp_as_dir" ]; then
+        _cp_die "ignoring ${_cp_dotfile}: profile '${_cp_dotname}' does not exist"
+        return 1
+    fi
+
+    if [ "${CLAUDE_CONFIG_DIR:-}" = "$_cp_as_dir" ]; then
+        export CLAUDE_PROFILE_AUTO_SET="$_cp_as_dir"
+        return 0
+    fi
+    export CLAUDE_CONFIG_DIR="$_cp_as_dir"
+    export CLAUDE_PROFILE_AUTO_SET="$_cp_as_dir"
+    _cp_auto_notice "profile '${_cp_dotname}' (from ${_cp_dotfile})"
+    return 0
+}
+
+# Registers _cp_auto_switch with whatever directory-change mechanism the
+# running shell offers. zsh has a real chpwd hook; bash only has
+# PROMPT_COMMAND; everything else (dash, ash, ksh) gets a cd wrapper, which
+# covers the common case even though it misses pushd/popd.
+if [ -n "${ZSH_VERSION:-}" ]; then
+    autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook chpwd _cp_auto_switch
+elif [ -n "${BASH_VERSION:-}" ]; then
+    case "${PROMPT_COMMAND:-}" in
+        *_cp_auto_switch*) : ;;
+        '') PROMPT_COMMAND="_cp_auto_switch" ;;
+        *) PROMPT_COMMAND="${PROMPT_COMMAND%;};_cp_auto_switch" ;;
+    esac
+else
+    # `command cd` bypasses this function, so re-sourcing can't recurse.
+    cd() {
+        command cd "$@" || return $?
+        _cp_auto_switch
+    }
+fi
+
+# Resolve once at source time so a shell started inside a .claude-profile
+# tree is already on the right profile.
+_cp_auto_switch
+
 # --- claude() wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
 # If CLAUDE_CONFIG_DIR is already set (e.g. via 'claude-profile use'),
@@ -416,6 +562,9 @@ _cp_update_check() {
 
 claude() {
     _cp_update_check
+    # Covers shells whose cd we couldn't hook (and directory changes made by
+    # something other than cd) — resolving here is cheap and idempotent.
+    _cp_auto_switch
     if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
         _cp_data=$(_cp_data_dir)
         _cp_def="${_cp_data}/.default"
@@ -423,6 +572,11 @@ claude() {
             _cp_name=$(cat "$_cp_def")
             if [ -n "$_cp_name" ] && [ -d "${_cp_data}/${_cp_name}" ]; then
                 export CLAUDE_CONFIG_DIR="${_cp_data}/${_cp_name}"
+                # Mark it auto-managed, not an explicit pin: without this, the
+                # first `claude` run would freeze the session on the default
+                # profile and later .claude-profile directories would be
+                # ignored.
+                export CLAUDE_PROFILE_AUTO_SET="$CLAUDE_CONFIG_DIR"
             fi
         fi
     fi
@@ -475,7 +629,98 @@ claude-profile() {
                 return 1
             fi
             export CLAUDE_CONFIG_DIR="$_cp_dir"
+            # Dropping the auto-set marker pins the session: subsequent
+            # directory changes will no longer override this choice.
+            unset CLAUDE_PROFILE_AUTO_SET
             printf 'Switched to profile: %s\n' "$_cp_name"
+            ;;
+
+        auto)
+            shift
+            case "${1:-}" in
+                on)
+                    unset _CP_AUTO_OFF
+                    unset CLAUDE_CONFIG_DIR
+                    unset CLAUDE_PROFILE_AUTO_SET
+                    _CP_AUTO_LAST_PWD=""
+                    _cp_auto_switch
+                    printf 'Directory-local auto-switching enabled.\n'
+                    ;;
+                off)
+                    _CP_AUTO_OFF=1
+                    printf 'Directory-local auto-switching disabled for this session.\n'
+                    ;;
+                ""|status)
+                    if [ -n "${CLAUDE_PROFILE_NO_AUTO_SWITCH:-}" ]; then
+                        printf 'Auto-switching: disabled (CLAUDE_PROFILE_NO_AUTO_SWITCH is set)\n'
+                    elif [ "${_CP_AUTO_OFF:-0}" = "1" ]; then
+                        printf 'Auto-switching: disabled for this session\n'
+                    elif [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "$CLAUDE_CONFIG_DIR" != "${CLAUDE_PROFILE_AUTO_SET:-}" ]; then
+                        printf 'Auto-switching: pinned (an explicit profile is active)\n'
+                        printf "Run 'claude-profile auto on' to resume auto-switching.\\n"
+                    else
+                        printf 'Auto-switching: enabled\n'
+                    fi
+                    if _cp_find_dotfile "${PWD:-}"; then
+                        _cp_read_dotfile "$_cp_dotfile"
+                        printf 'Directory profile: %s (%s)\n' "${_cp_dotname:-<empty>}" "$_cp_dotfile"
+                    else
+                        printf 'Directory profile: none in scope\n'
+                    fi
+                    ;;
+                *)
+                    _cp_die "usage: claude-profile auto [on|off|status]"
+                    return 1
+                    ;;
+            esac
+            ;;
+
+        local)
+            shift
+            case "${1:-}" in
+                "")
+                    if _cp_find_dotfile "${PWD:-}"; then
+                        _cp_read_dotfile "$_cp_dotfile"
+                        printf '%s\n' "$_cp_dotfile"
+                        printf 'Profile: %s\n' "${_cp_dotname:-<empty>}"
+                    else
+                        _cp_die "no ${_CP_DOTFILE} found in this directory or any parent"
+                        return 1
+                    fi
+                    ;;
+                --remove|--clear)
+                    if [ ! -f "./${_CP_DOTFILE}" ]; then
+                        _cp_die "no ${_CP_DOTFILE} in the current directory"
+                        return 1
+                    fi
+                    rm -f "./${_CP_DOTFILE}" || return 1
+                    printf 'Removed %s\n' "${PWD}/${_CP_DOTFILE}"
+                    _CP_AUTO_LAST_PWD=""
+                    _cp_auto_switch
+                    ;;
+                -*)
+                    _cp_die "unknown option '$1'"
+                    return 1
+                    ;;
+                *)
+                    _cp_name="$1"
+                    shift
+                    if [ -n "${1:-}" ]; then
+                        _cp_die "unexpected argument after profile name: '$1'"
+                        return 1
+                    fi
+                    _cp_validate_name "$_cp_name" || return 1
+                    _cp_dir="${_cp_data}/${_cp_name}"
+                    if [ ! -d "$_cp_dir" ]; then
+                        _cp_die "profile '${_cp_name}' does not exist. Create it with: claude-profile create ${_cp_name}"
+                        return 1
+                    fi
+                    printf '%s\n' "$_cp_name" > "./${_CP_DOTFILE}" || return 1
+                    printf 'Wrote %s (profile: %s)\n' "${PWD}/${_CP_DOTFILE}" "$_cp_name"
+                    _CP_AUTO_LAST_PWD=""
+                    _cp_auto_switch
+                    ;;
+            esac
             ;;
 
         create)
@@ -708,10 +953,13 @@ Usage: claude-profile [command] [args...]
 
 Commands:
     (no command)            Show current profile status
-    use <name>              Switch session to the named profile
+    use <name>              Switch session to the named profile (pins it)
     create [--init] <name>  Create a new profile (--init writes a settings.json skeleton)
     list, ls                List all profiles
     default [name]          Get or set the default profile
+    local [name]            Show, set (.claude-profile), or --remove the
+                            directory-local profile for the current directory
+    auto [on|off|status]    Control directory-local auto-switching
     which [name]            Show the resolved config directory path
     version                 Show the installed version
     update [--force]        Update to the latest release
@@ -721,6 +969,13 @@ Commands:
 The claude command automatically uses the default profile. Use
 'claude-profile use <name>' to override for the current session.
 
+A directory containing a .claude-profile file (holding a profile name)
+switches the shell to that profile on cd, and reverts on leaving. An
+explicit 'claude-profile use' pins the session and wins over any
+.claude-profile until 'claude-profile auto on'. Set
+CLAUDE_PROFILE_NO_AUTO_SWITCH=1 to disable, CLAUDE_PROFILE_AUTO_QUIET=1
+to switch silently.
+
 Examples:
     claude-profile create work
     claude-profile create --init work
@@ -728,6 +983,8 @@ Examples:
     claude-profile use work
     claude                          # runs with "work" profile
     claude-profile                  # shows active/default status
+    claude-profile local work       # pin this directory tree to "work"
+    claude-profile local --remove   # drop the directory-local profile
 HELPEOF
             ;;
 
@@ -742,7 +999,11 @@ HELPEOF
                 esac
             fi
             if [ -n "$_cp_active" ]; then
-                printf 'Active profile: %s\n' "$_cp_active"
+                if [ "${CLAUDE_CONFIG_DIR:-}" = "${CLAUDE_PROFILE_AUTO_SET:-}" ] && _cp_find_dotfile "${PWD:-}"; then
+                    printf 'Active profile: %s (from %s)\n' "$_cp_active" "$_cp_dotfile"
+                else
+                    printf 'Active profile: %s\n' "$_cp_active"
+                fi
                 printf 'Config directory: %s\n' "$CLAUDE_CONFIG_DIR"
             elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
                 printf 'Active config directory: %s (not a managed profile)\n' "$CLAUDE_CONFIG_DIR"
