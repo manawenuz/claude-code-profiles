@@ -45,6 +45,8 @@ claude -p "explain this code"
 | `claude-profile create <name>` | Create a new profile |
 | `claude-profile list` | List all profiles |
 | `claude-profile default [name]` | Get or set the default profile |
+| `claude-profile local [name]` | Show, set, or `--remove` this directory's `.claude-profile` |
+| `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (not on cmd.exe) |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile which [name]` | Show the config directory path |
 | `claude-profile version` | Show the installed version |
@@ -55,9 +57,10 @@ claude -p "explain this code"
 
 Claude Code supports a `CLAUDE_CONFIG_DIR` environment variable that redirects where it stores configuration and data. `claude-profile` provides a `claude()` shell function that wraps the real `claude` binary:
 
-1. Before each invocation, the wrapper checks if a default profile exists and auto-sets `CLAUDE_CONFIG_DIR`.
-2. If `CLAUDE_CONFIG_DIR` is already set (e.g., via `claude-profile use`), it is used as-is.
-3. The real `claude` binary is then called with all your arguments.
+1. On each directory change, the nearest `.claude-profile` file (if any) sets `CLAUDE_CONFIG_DIR` — see [Per-Directory Profiles](#per-directory-profiles).
+2. Before each invocation, the wrapper checks if a default profile exists and auto-sets `CLAUDE_CONFIG_DIR`.
+3. If `CLAUDE_CONFIG_DIR` is already set (e.g., via `claude-profile use`), it is used as-is.
+4. The real `claude` binary is then called with all your arguments.
 
 This means you never need to think about profiles during normal use -- just run `claude` as you always have.
 
@@ -72,6 +75,65 @@ claude                          # uses "personal" for this shell session
 ```
 
 The override lasts until you close the shell or run `claude-profile use` again.
+
+### Per-Directory Profiles
+
+A directory can pin itself (and everything under it) to a profile by holding
+a `.claude-profile` file whose first non-empty, non-comment line is a profile
+name:
+
+```sh
+cd ~/work/acme
+claude-profile local work        # writes ./.claude-profile containing "work"
+```
+
+Your shell now switches to `work` whenever you `cd` into that tree, and back
+to the default when you leave:
+
+```
+$ cd ~/work/acme/api
+claude-profile: profile 'work' (from /home/you/work/acme/.claude-profile)
+$ cd ~
+claude-profile: directory profile cleared; using the default profile
+```
+
+The file is plain text — you can commit it to a repo, and blank lines and
+`#` comments are ignored:
+
+```
+# every checkout of this repo uses the client's isolated profile
+client-acme
+```
+
+Precedence and control:
+
+- An explicit `claude-profile use <name>` **pins** the session: it wins over
+  any `.claude-profile` until you run `claude-profile auto on`, which clears
+  the pin and re-resolves the current directory.
+- `claude-profile auto off` disables auto-switching for the session;
+  `claude-profile auto status` shows what's in effect.
+- `CLAUDE_PROFILE_NO_AUTO_SWITCH=1` disables it entirely,
+  `CLAUDE_PROFILE_AUTO_QUIET=1` switches silently.
+- A `.claude-profile` naming a profile that doesn't exist (or an invalid
+  name) is reported on stderr once per directory entry and otherwise ignored.
+- `claude-profile local --remove` deletes the `.claude-profile` in the
+  current directory.
+
+Hooking into directory changes is per-shell: zsh uses `chpwd`, bash uses
+`PROMPT_COMMAND`, and other POSIX shells get a `cd` wrapper. PowerShell 6+
+uses `LocationChangedAction`; Windows PowerShell 5.1 hooks the `prompt`
+function.
+
+**cmd.exe is different.** It has no `cd` hook and no transparent `claude`
+wrapper, so it can't switch automatically. Instead, a bare
+`call claude-profile.cmd` prefers the nearest `.claude-profile` over the
+default profile, and `claude-profile local <name>` writes the file:
+
+```bat
+claude-profile local work
+call claude-profile
+claude
+```
 
 ### Profile Storage
 

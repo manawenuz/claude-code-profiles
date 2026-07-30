@@ -25,6 +25,7 @@ if "%~1"=="" goto :cmd_launch_default
 
 :: Command dispatch
 if "%~1"=="create"  goto :dispatch_create
+if "%~1"=="local"   goto :dispatch_local
 if "%~1"=="list"    goto :dispatch_list
 if "%~1"=="ls"      goto :dispatch_list
 if "%~1"=="default" goto :dispatch_default
@@ -53,6 +54,10 @@ exit /b 1
 :dispatch_create
 shift
 goto :cmd_create
+
+:dispatch_local
+shift
+goto :cmd_local
 
 :dispatch_list
 shift
@@ -271,11 +276,13 @@ goto :eof
 echo Usage: claude-profile [command] [args...]
 echo.
 echo Commands:
-echo     (no command)            Activate the default profile
+echo     (no command)            Activate the .claude-profile or default profile
 echo     use ^<name^>              Activate the named profile
 echo     create ^<name^>           Create a new profile
 echo     list, ls                List all profiles
 echo     default [name]          Get or set the default profile
+echo     local [name]            Show, set (.claude-profile), or --remove the
+echo                             directory-local profile for this directory
 echo     delete ^<name^>           Delete a profile
 echo     which [name]            Show the resolved config directory path
 echo     version                 Show the installed version
@@ -285,11 +292,18 @@ echo.
 echo Use 'call claude-profile use ^<name^>' to set CLAUDE_CONFIG_DIR in the
 echo current cmd session, then run 'claude' separately.
 echo.
+echo A directory containing a .claude-profile file (holding a profile name)
+echo is preferred over the default profile by a bare 'call claude-profile'.
+echo cmd.exe has no cd hook, so this resolves at invocation time rather than
+echo automatically on cd as it does in the sh and PowerShell versions.
+echo.
 echo Examples:
 echo     claude-profile create work
 echo     claude-profile default work
 echo     call claude-profile use work     # activates "work" profile
 echo     claude                           # runs with "work" profile
+echo     claude-profile local work        # write .claude-profile here
+echo     call claude-profile              # activates "work" from .claude-profile
 exit /b 0
 
 :: --- Validate name ---
@@ -329,7 +343,141 @@ echo !_vn_name!| findstr /R "^[a-zA-Z0-9_-][a-zA-Z0-9_-]*$" >nul 2>&1 || (
 
 goto :eof
 
+:: --- Directory-local profile (.claude-profile) ---
+::
+:: A directory may contain a `.claude-profile` file whose first non-empty,
+:: non-comment line names a profile. cmd.exe has no cd hook and no way to
+:: install a transparent `claude` wrapper, so unlike the sh and PowerShell
+:: implementations this cannot switch on cd. Instead, a bare
+:: `call claude-profile.cmd` resolves the nearest .claude-profile walking up
+:: from the current directory and prefers it over the default profile.
+
+:: Sets _fd_result to the nearest .claude-profile at or above %CD%, or leaves
+:: it empty when none is found.
+:find_dotfile
+set "_fd_result="
+set "_fd_dir=%CD%"
+:find_dotfile_loop
+if exist "!_fd_dir!\.claude-profile" (
+    set "_fd_result=!_fd_dir!\.claude-profile"
+    goto :eof
+)
+set "_fd_parent="
+for %%p in ("!_fd_dir!\..") do set "_fd_parent=%%~fp"
+if not defined _fd_parent goto :eof
+if /i "!_fd_parent!"=="!_fd_dir!" goto :eof
+set "_fd_dir=!_fd_parent!"
+goto :find_dotfile_loop
+
+:: Captures a literal CR into _CP_CR. `for /f` leaves the CR attached to each
+:: token when reading a CRLF file, which would otherwise make an otherwise
+:: valid profile name fail validation. Resolved lazily (only :read_dotfile
+:: needs it) so the common command paths don't pay for the copy.
+:capture_cr
+if defined _CP_CR goto :eof
+for /f %%a in ('copy /Z "%~f0" nul') do set "_CP_CR=%%a"
+goto :eof
+
+:: read_dotfile <path> -> sets _rd_name to the first non-empty, non-comment
+:: line, with surrounding whitespace and any trailing CR stripped.
+:read_dotfile
+call :capture_cr
+set "_rd_name="
+for /f "usebackq eol=# tokens=* delims=	 " %%L in ("%~1") do (
+    if not defined _rd_name set "_rd_name=%%L"
+)
+if not defined _rd_name goto :eof
+:read_dotfile_trim
+if not defined _rd_name goto :eof
+if "!_rd_name:~-1!"==" "       (set "_rd_name=!_rd_name:~0,-1!" & goto :read_dotfile_trim)
+if "!_rd_name:~-1!"=="	"      (set "_rd_name=!_rd_name:~0,-1!" & goto :read_dotfile_trim)
+if "!_rd_name:~-1!"=="!_CP_CR!" (set "_rd_name=!_rd_name:~0,-1!" & goto :read_dotfile_trim)
+goto :eof
+
+:: Resolves the directory-local profile into _dl_name / _dl_file, or leaves
+:: _dl_name empty. Reports (to stderr) a dotfile that names something
+:: unusable, so a typo isn't silently ignored.
+:resolve_dotfile_profile
+set "_dl_name="
+set "_dl_file="
+call :find_dotfile
+if not defined _fd_result goto :eof
+set "_dl_file=!_fd_result!"
+call :read_dotfile "!_dl_file!"
+if not defined _rd_name (
+    echo claude-profile: ignoring !_dl_file!: no profile name in file >&2
+    goto :eof
+)
+set "_vn_name=!_rd_name!"
+call :validate_name >nul 2>&1
+if errorlevel 1 (
+    echo claude-profile: ignoring !_dl_file!: invalid profile name '!_rd_name!' >&2
+    goto :eof
+)
+if not exist "%DATA_DIR%\!_rd_name!\" (
+    echo claude-profile: ignoring !_dl_file!: profile '!_rd_name!' does not exist >&2
+    goto :eof
+)
+set "_dl_name=!_rd_name!"
+goto :eof
+
 :: --- Commands ---
+
+:cmd_local
+if "%~1"=="" goto :cmd_local_show
+if /i "%~1"=="--remove" goto :cmd_local_remove
+if /i "%~1"=="--clear"  goto :cmd_local_remove
+set "_first=%~1"
+if "!_first:~0,1!"=="-" (
+    echo claude-profile: unknown option '%~1' >&2
+    exit /b 1
+)
+if not "%~2"=="" (
+    echo claude-profile: unexpected argument after profile name: '%~2' >&2
+    exit /b 1
+)
+set "_vn_name=%~1"
+call :validate_name
+if errorlevel 1 exit /b 1
+if not exist "%DATA_DIR%\%~1\" (
+    echo claude-profile: profile '%~1' does not exist. Create it with: claude-profile create %~1 >&2
+    exit /b 1
+)
+>"%CD%\.claude-profile" echo %~1
+if not exist "%CD%\.claude-profile" (
+    echo claude-profile: could not write %CD%\.claude-profile >&2
+    exit /b 1
+)
+echo Wrote %CD%\.claude-profile ^(profile: %~1^)
+echo Run 'call claude-profile.cmd' here to activate it.
+exit /b 0
+
+:cmd_local_show
+call :resolve_dotfile_profile
+if not defined _dl_file (
+    echo claude-profile: no .claude-profile found in this directory or any parent >&2
+    exit /b 1
+)
+echo !_dl_file!
+if defined _dl_name (
+    echo Profile: !_dl_name!
+) else (
+    exit /b 1
+)
+exit /b 0
+
+:cmd_local_remove
+if not exist "%CD%\.claude-profile" (
+    echo claude-profile: no .claude-profile in the current directory >&2
+    exit /b 1
+)
+del /f /q "%CD%\.claude-profile" >nul 2>&1
+if exist "%CD%\.claude-profile" (
+    echo claude-profile: could not remove %CD%\.claude-profile >&2
+    exit /b 1
+)
+echo Removed %CD%\.claude-profile
+exit /b 0
 
 :cmd_create
 if "%~1"=="" (
@@ -641,6 +789,10 @@ if exist "%DEFAULT_FILE%" (
 exit /b 0
 
 :cmd_launch_default
+:: A .claude-profile in this directory (or any parent) wins over the default.
+call :resolve_dotfile_profile
+if defined _dl_name goto :launch_dotfile
+
 :: Resolve default profile
 if not exist "%DEFAULT_FILE%" (
     echo claude-profile: no default profile set. Use: claude-profile default ^<name^> >&2
@@ -659,4 +811,14 @@ if not exist "!_rp_dir!\" (
 
 :: Set CLAUDE_CONFIG_DIR for the calling session (requires 'call' prefix)
 endlocal & set "CLAUDE_CONFIG_DIR=%_rp_dir%" & echo Switched to profile: %_rp_name% (default)
+exit /b 0
+
+:launch_dotfile
+:: Kept out of the `if defined` block above: `endlocal & set VAR=%...%`
+:: relies on percent-expansion happening after the preceding set lines have
+:: run, which a parenthesised block would break.
+set "_rp_name=%_dl_name%"
+set "_rp_dir=%DATA_DIR%\%_dl_name%"
+set "_rp_src=%_dl_file%"
+endlocal & set "CLAUDE_CONFIG_DIR=%_rp_dir%" & echo Switched to profile: %_rp_name% (from %_rp_src%)
 exit /b 0

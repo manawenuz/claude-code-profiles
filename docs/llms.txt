@@ -24,6 +24,8 @@ Each profile is a complete, isolated Claude Code configuration directory contain
 - `claude-profile list`: List all profiles
 - `claude-profile default [name]`: Get or set the default profile
 - `claude-profile use <name>`: Switch to a profile for the current shell session
+- `claude-profile local [name]`: Show, set, or `--remove` this directory's `.claude-profile`
+- `claude-profile auto [on|off|status]`: Control directory-local auto-switching
 - `claude-profile which [name]`: Show the config directory path
 - `claude-profile delete <name>`: Delete a profile (with confirmation)
 - `claude-profile help`: Show help
