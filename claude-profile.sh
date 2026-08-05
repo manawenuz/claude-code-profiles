@@ -545,10 +545,12 @@ elif [ -n "${BASH_VERSION:-}" ]; then
     esac
 else
     # `command cd` bypasses this function, so re-sourcing can't recurse.
-    cd() {
+    # eval keeps the definition out of zsh's parser, which would otherwise
+    # alias-expand `cd` at source time and abort with a parse error.
+    eval 'cd() {
         command cd "$@" || return $?
         _cp_auto_switch
-    }
+    }'
 fi
 
 # Resolve once at source time so a shell started inside a .claude-profile
