@@ -92,7 +92,7 @@ to the default when you leave:
 
 ```
 $ cd ~/work/acme/api
-claude-profile: profile 'work' (from /home/you/work/acme/.claude-profile)
+claude-profile: switched to profile 'work' (from /home/you/work/acme/.claude-profile)
 $ cd ~
 claude-profile: directory profile cleared; using the default profile
 ```

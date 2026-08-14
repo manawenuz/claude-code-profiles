@@ -527,7 +527,7 @@ _cp_auto_switch() {
     fi
     export CLAUDE_CONFIG_DIR="$_cp_as_dir"
     export CLAUDE_PROFILE_AUTO_SET="$_cp_as_dir"
-    _cp_auto_notice "profile '${_cp_dotname}' (from ${_cp_dotfile})"
+    _cp_auto_notice "switched to profile '${_cp_dotname}' (from ${_cp_dotfile})"
     return 0
 }
 
