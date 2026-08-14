@@ -303,7 +303,7 @@ function Invoke-CPAutoSwitch {
 
         if ($env:CLAUDE_CONFIG_DIR -ne $profileDir) {
             $env:CLAUDE_CONFIG_DIR = $profileDir
-            Write-CPAutoNotice "profile '$name' (from $dotfile)"
+            Write-CPAutoNotice "switched to profile '$name' (from $dotfile)"
         }
         $env:CLAUDE_PROFILE_AUTO_SET = $profileDir
     } catch {
