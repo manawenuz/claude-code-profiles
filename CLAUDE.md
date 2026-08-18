@@ -33,6 +33,7 @@ All three implementations share the same command interface:
 | `claude-profile default [name]` | Get or set the default profile |
 | `claude-profile local [name]` | Show, set, or `--remove` the directory-local `.claude-profile` |
 | `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (sh/ps1 only) |
+| `claude-profile skills ...` | Manage the shared skill pool and per-profile selections (see below) |
 | `claude-profile which [name]` | Show the resolved config directory path |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile help` | Show help |
@@ -46,6 +47,33 @@ The pin is tracked via an exported `CLAUDE_PROFILE_AUTO_SET` marker: auto-switch
 Directory-change hooks differ per shell: zsh `chpwd`, bash `PROMPT_COMMAND`, `cd` wrapper elsewhere; PowerShell 6+ `LocationChangedAction`, PowerShell 5.1 `prompt` wrapper. cmd.exe has no hook — a bare `call claude-profile.cmd` resolves the dotfile at invocation time instead.
 
 Because bash re-runs the resolver on every prompt, `_cp_auto_switch` short-circuits when `$PWD` is unchanged and the upward walk uses only parameter expansion (no `dirname` fork per component). That short-circuit also rate-limits the "invalid/missing profile" warnings to once per directory entry.
+
+## Per-Profile Skills
+
+A shared skill pool lives at `<data-root>/skills/` (the profile name
+`skills` is therefore reserved and rejected by validation in all three
+implementations, including the `.claude-profile` resolvers). `skills
+register <name> <path>` links a skill source directory (must contain
+`SKILL.md`) into the pool — `ln -s` on POSIX, directory junctions
+(`mklink /J`, no admin rights) on Windows including via Git Bash
+(`cmd //c mklink /J` + `cygpath -w`) so all three implementations share
+the links.
+
+Each profile may have a `skills.conf` manifest (one pool-skill name per
+line, `#` comments, same parser style as `.claude-profile`). Absent
+manifest = all pool skills (backward-compatible default); empty manifest
+= none. `skills add`/`remove` first materialize the implicit "all" list
+into `skills.conf` so edits stay sticky.
+
+Sync (`skills sync`, also run by `create` and every manifest-editing
+command) is two-pass: remove managed links that are dangling or
+undesired, then create missing ones. A link is *managed* iff its literal
+target lies under the pool directory — anything else in
+`<profile>/skills/` (hand-made symlinks, real dirs) is never touched;
+name collisions warn and the unmanaged entry wins. Sync never runs on
+`use` or the auto-switch hot path. In cmd, link targets are read by
+parsing `dir /AL` output and managed detection is an exact-target
+comparison against `<pool>\<name>`.
 
 ## Validation Rules
 

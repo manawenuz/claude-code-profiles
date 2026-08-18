@@ -47,6 +47,14 @@ claude -p "explain this code"
 | `claude-profile default [name]` | Get or set the default profile |
 | `claude-profile local [name]` | Show, set, or `--remove` this directory's `.claude-profile` |
 | `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (not on cmd.exe) |
+| `claude-profile skills` | List pool skills and their status for the profile |
+| `claude-profile skills register <name> <path>` | Add a skill directory to the shared pool |
+| `claude-profile skills unregister [--force] <name>` | Remove a skill from the pool |
+| `claude-profile skills add <skill> [profile]` | Add a pool skill to a profile |
+| `claude-profile skills remove <skill> [profile]` | Remove a pool skill from a profile |
+| `claude-profile skills set <s1,s2,...> [profile]` | Replace a profile's skill selection |
+| `claude-profile skills reset [profile]` | Back to the default (all pool skills) |
+| `claude-profile skills sync [profile\|--all]` | Re-materialize skill links |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile which [name]` | Show the config directory path |
 | `claude-profile version` | Show the installed version |
@@ -134,6 +142,52 @@ claude-profile local work
 call claude-profile
 claude
 ```
+
+### Per-Profile Skills
+
+Skills usually have to be curated by hand per config directory. `claude-profile`
+can instead manage them from a **shared pool** at `<data-dir>/skills/`
+(next to your profile directories), with each profile selecting the subset
+it wants — so a `backend` profile only loads backend skills, keeping
+context lean:
+
+```sh
+# Register skills into the pool (each path must contain a SKILL.md)
+claude-profile skills register api-design ~/skills/api-design
+claude-profile skills register ui-design  ~/skills/ui-design
+
+# Pick subsets per profile
+claude-profile skills set api-design backend
+claude-profile skills set ui-design frontend
+
+# Or tweak incrementally
+claude-profile skills add ui-design backend
+claude-profile skills remove ui-design backend
+```
+
+How it works:
+
+- Registering creates a symlink (a directory **junction** on Windows — no
+  admin rights needed) in the pool; the pool entry name is what profiles
+  refer to.
+- A profile's selection lives in `<profile>/skills.conf` — plain text, one
+  skill name per line, `#` comments allowed. **No `skills.conf` means the
+  profile gets every pool skill**, so existing profiles keep working
+  unchanged. An empty file means none.
+- Syncing materializes the selection as links in `<profile>/skills/`. The
+  tool only ever creates or removes links that point into the pool —
+  hand-made symlinks, real directories, and files in `<profile>/skills/`
+  are never touched (a name collision is reported and the unmanaged entry
+  wins).
+- Links update only when you run a `skills` command (or at
+  `claude-profile create`) — switching profiles does no filesystem work.
+  After registering or unregistering pool skills, run
+  `claude-profile skills sync --all` to propagate.
+- The profile name `skills` is reserved for the pool directory.
+
+`claude-profile` status and `list` output annotate filtered profiles, e.g.
+`skills: 3/12 (filtered)`. (cmd.exe has no bare status command, so there
+the annotation appears in `list` only.)
 
 ### Profile Storage
 
