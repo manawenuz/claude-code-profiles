@@ -290,7 +290,7 @@ function Invoke-CPAutoSwitch {
             return
         }
 
-        if ($name -notmatch '^[A-Za-z0-9_-]+$') {
+        if ($name -notmatch '^[A-Za-z0-9_-]+$' -or $name -eq 'skills') {
             $host.UI.WriteErrorLine("claude-profile: ignoring ${dotfile}: invalid profile name '$name'")
             return
         }
@@ -340,6 +340,176 @@ if (-not $Script:CPLocationHookInstalled) {
 # Resolve once at load time so a session started inside a .claude-profile
 # tree is already on the right profile.
 Invoke-CPAutoSwitch
+
+# --- Skill pool helpers ---
+#
+# A central pool at <data-root>/skills holds registered skills (directories
+# or links to skill source directories). Each profile may carry a
+# skills.conf manifest (one pool-skill name per line, # comments) naming
+# the subset it wants; no manifest means every pool skill. Sync
+# materializes the selection as links in <profile>/skills. Only links
+# whose target lies under the pool are ever created or removed — hand-made
+# links, real directories, and files are left alone.
+
+function Get-CPSkillPoolDir {
+    return Join-Path (Get-CPDataDir) 'skills'
+}
+
+# Creates a link at $Dest pointing to directory $Source: a directory
+# junction on Windows (no admin rights needed, readable by the cmd and sh
+# implementations), a symlink elsewhere. Returns $true on success.
+function New-CPSkillLink {
+    param([string]$Source, [string]$Dest)
+    try {
+        if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+            New-Item -ItemType Junction -Path $Dest -Target $Source -ErrorAction Stop | Out-Null
+        } else {
+            New-Item -ItemType SymbolicLink -Path $Dest -Target $Source -ErrorAction Stop | Out-Null
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Returns the literal link target of $Path, or $null when it is not a
+# link (junction or symlink).
+function Get-CPLinkTarget {
+    param([string]$Path)
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not $item.LinkType) { return $null }
+    $target = @($item.Target) | Select-Object -First 1
+    if ($target) { return [string]$target }
+    return $null
+}
+
+# Removes a link without touching its target. FileSystemInfo.Delete() is
+# non-recursive, so on a junction it removes only the reparse point.
+function Remove-CPSkillLink {
+    param([string]$Path)
+    try {
+        (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Delete()
+        return $true
+    } catch {
+        try {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            return $true
+        } catch {
+            return $false
+        }
+    }
+}
+
+# Returns $true when the link at $Path is managed, i.e. its target lies
+# under the pool directory.
+function Test-CPManagedSkillLink {
+    param([string]$Path, [string]$PoolDir)
+    $target = Get-CPLinkTarget -Path $Path
+    if (-not $target) { return $false }
+    $normTarget = $target.Replace('\', '/').TrimEnd('/')
+    $normPool = $PoolDir.Replace('\', '/').TrimEnd('/')
+    return $normTarget.StartsWith("$normPool/")
+}
+
+# Returns the valid skill names from manifest file $Path. Blank lines and
+# # comments are skipped; invalid names warn and are skipped so one bad
+# line never fails a whole sync.
+function Read-CPSkillManifest {
+    param([string]$Path)
+    $names = @()
+    try {
+        $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    } catch {
+        return $names
+    }
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith('#')) { continue }
+        if ($trimmed -notmatch '^[A-Za-z0-9_-]+$') {
+            $host.UI.WriteErrorLine("claude-profile: skills.conf: ignoring invalid skill name '$trimmed'")
+            continue
+        }
+        $names += $trimmed
+    }
+    return $names
+}
+
+# Returns the names of every skill registered in the pool, including
+# dangling registrations (link whose source is gone) so listings can
+# report them and sync can warn.
+function Get-CPPoolSkills {
+    param([string]$PoolDir)
+    if (-not (Test-Path -LiteralPath $PoolDir -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $PoolDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSIsContainer -or $_.LinkType } |
+        ForEach-Object { $_.Name })
+}
+
+# Returns the desired skill set for a profile: the manifest names when
+# skills.conf exists, every pool skill otherwise.
+function Get-CPDesiredSkills {
+    param([string]$ProfileDir, [string]$PoolDir)
+    $manifest = Join-Path $ProfileDir 'skills.conf'
+    if (Test-Path -LiteralPath $manifest -PathType Leaf) {
+        return @(Read-CPSkillManifest -Path $manifest)
+    }
+    return @(Get-CPPoolSkills -PoolDir $PoolDir)
+}
+
+# Re-materializes managed skill links for profile $Name from its manifest
+# (or the whole pool when no manifest).
+function Sync-CPProfileSkills {
+    param([string]$Name)
+    $dataDir = Get-CPDataDir
+    $poolDir = Join-Path $dataDir 'skills'
+    $profileDir = Join-Path $dataDir $Name
+    $skillsDir = Join-Path $profileDir 'skills'
+    $desired = @(Get-CPDesiredSkills -ProfileDir $profileDir -PoolDir $poolDir)
+    try {
+        New-Item -ItemType Directory -Path $skillsDir -Force -ErrorAction Stop | Out-Null
+    } catch {
+        $host.UI.WriteErrorLine("claude-profile: cannot create $skillsDir")
+        return $false
+    }
+
+    # Pass 1: drop managed links that are dangling or no longer desired.
+    foreach ($entry in @(Get-ChildItem -LiteralPath $skillsDir -Force -ErrorAction SilentlyContinue)) {
+        if (-not $entry.LinkType) { continue }
+        if (-not (Test-CPManagedSkillLink -Path $entry.FullName -PoolDir $poolDir)) { continue }
+        $poolEntry = Join-Path $poolDir $entry.Name
+        if (($desired -notcontains $entry.Name) -or
+            -not (Test-Path -LiteralPath $poolEntry -PathType Container)) {
+            if (-not (Remove-CPSkillLink -Path $entry.FullName)) {
+                $host.UI.WriteErrorLine("claude-profile: could not remove $($entry.FullName)")
+            }
+        }
+    }
+
+    # Pass 2: create links missing from the desired set.
+    foreach ($want in $desired) {
+        $poolEntry = Join-Path $poolDir $want
+        if (-not (Test-Path -LiteralPath $poolEntry -PathType Container)) {
+            $host.UI.WriteErrorLine("claude-profile: skill '$want' is not in the pool (or its source is gone); skipping")
+            continue
+        }
+        $dest = Join-Path $skillsDir $want
+        if (Test-Path -LiteralPath $dest) {
+            if (-not (Test-CPManagedSkillLink -Path $dest -PoolDir $poolDir)) {
+                $host.UI.WriteErrorLine("claude-profile: skill '$want': unmanaged entry already at $dest; skipping")
+            }
+            continue
+        }
+        if (-not (New-CPSkillLink -Source $poolEntry -Dest $dest)) {
+            $host.UI.WriteErrorLine("claude-profile: could not link skill '$want'")
+        }
+    }
+    return $true
+}
 
 # --- claude wrapper ---
 # Auto-resolves the default profile before calling the real claude binary.
@@ -420,7 +590,59 @@ function claude-profile {
             _cp_die "invalid profile name '$Name': use only letters, digits, hyphens, underscores"
             return $false
         }
+        if ($Name -eq 'skills') {
+            _cp_die "profile name 'skills' is reserved for the skill pool"
+            return $false
+        }
         return $true
+    }
+
+    function _cp_validate_skill_name {
+        param([string]$Name)
+        if ([string]::IsNullOrEmpty($Name)) {
+            _cp_die 'skill name must not be empty'
+            return $false
+        }
+        if ($Name -notmatch '^[A-Za-z0-9_-]+$') {
+            _cp_die "invalid skill name '$Name': use only letters, digits, hyphens, underscores"
+            return $false
+        }
+        return $true
+    }
+
+    # Resolves the profile a skills command acts on: the explicit argument
+    # if given, else the active profile, else the default. Returns the
+    # profile name, or $null after printing an error.
+    function _cp_skills_profile {
+        param([string]$ArgName)
+        $name = $null
+        if ($ArgName) {
+            if (-not (_cp_validate_name $ArgName)) { return $null }
+            $name = $ArgName
+        } elseif ($env:CLAUDE_CONFIG_DIR) {
+            $normalized = $env:CLAUDE_CONFIG_DIR.Replace('\', '/')
+            $normalizedData = $DataDir.Replace('\', '/')
+            if ($normalized.StartsWith("$normalizedData/")) {
+                $name = Split-Path $env:CLAUDE_CONFIG_DIR -Leaf
+            } else {
+                _cp_die 'active CLAUDE_CONFIG_DIR is not a managed profile; pass a profile name'
+                return $null
+            }
+        } elseif (Test-Path $DefaultFile) {
+            $name = (Get-Content $DefaultFile -Raw).Trim()
+            if (-not $name) {
+                _cp_die 'no profile specified and no default profile set'
+                return $null
+            }
+        } else {
+            _cp_die 'no profile specified and no default profile set'
+            return $null
+        }
+        if (-not (Test-Path (Join-Path $DataDir $name) -PathType Container)) {
+            _cp_die "profile '$name' does not exist"
+            return $null
+        }
+        return $name
     }
 
     # --- Command dispatch ---
@@ -559,6 +781,11 @@ function claude-profile {
             New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
             Write-Host "Created profile: $ArgName"
             Write-Host "Config directory: $ProfileDir"
+            # A new profile has no manifest, so this links every pool skill
+            # (the backward-compatible "all" default). No pool: no-op.
+            if (Test-Path (Join-Path $DataDir 'skills') -PathType Container) {
+                Sync-CPProfileSkills -Name $ArgName | Out-Null
+            }
         }
 
         { $_ -eq 'list' -or $_ -eq 'ls' } {
@@ -579,22 +806,30 @@ function claude-profile {
                     $Active = Split-Path $env:CLAUDE_CONFIG_DIR -Leaf
                 }
             }
-            $Entries = Get-ChildItem -Path $DataDir -Directory -ErrorAction SilentlyContinue
+            $Entries = @(Get-ChildItem -Path $DataDir -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne 'skills' })
             if (-not $Entries -or $Entries.Count -eq 0) {
                 Write-Host 'No profiles found. Create one with: claude-profile create <name>'
                 return
             }
+            $PoolCount = @(Get-CPPoolSkills -PoolDir (Join-Path $DataDir 'skills')).Count
             foreach ($Entry in $Entries) {
+                $SkillNote = ''
+                $Manifest = Join-Path $Entry.FullName 'skills.conf'
+                if (Test-Path -LiteralPath $Manifest -PathType Leaf) {
+                    $SkillCount = @(Read-CPSkillManifest -Path $Manifest).Count
+                    $SkillNote = " [skills: $SkillCount/$PoolCount]"
+                }
                 $IsDefault = ($Entry.Name -eq $CurDefault)
                 $IsActive = ($Entry.Name -eq $Active)
                 if ($IsDefault -and $IsActive) {
-                    Write-Host ">* $($Entry.Name) (default, active)"
+                    Write-Host ">* $($Entry.Name) (default, active)$SkillNote"
                 } elseif ($IsDefault) {
-                    Write-Host " * $($Entry.Name) (default)"
+                    Write-Host " * $($Entry.Name) (default)$SkillNote"
                 } elseif ($IsActive) {
-                    Write-Host ">  $($Entry.Name) (active)"
+                    Write-Host ">  $($Entry.Name) (active)$SkillNote"
                 } else {
-                    Write-Host "   $($Entry.Name)"
+                    Write-Host "   $($Entry.Name)$SkillNote"
                 }
             }
         }
@@ -696,6 +931,235 @@ function claude-profile {
             }
         }
 
+        'skills' {
+            $PoolDir = Join-Path $DataDir 'skills'
+            $Sub = if ($args.Count -gt 1) { $args[1] } else { $null }
+            switch ($Sub) {
+                'register' {
+                    $SkillName = if ($args.Count -gt 2) { $args[2] } else { $null }
+                    $SkillPath = if ($args.Count -gt 3) { $args[3] } else { $null }
+                    if (-not $SkillName -or -not $SkillPath) {
+                        _cp_die 'usage: claude-profile skills register <name> <path>'
+                        return
+                    }
+                    if ($args.Count -gt 4) {
+                        _cp_die "unexpected argument '$($args[4])'"
+                        return
+                    }
+                    if (-not (_cp_validate_skill_name $SkillName)) { return }
+                    if (-not (Test-Path -LiteralPath $SkillPath -PathType Container)) {
+                        _cp_die "'$SkillPath' is not a directory"
+                        return
+                    }
+                    if (-not (Test-Path -LiteralPath (Join-Path $SkillPath 'SKILL.md') -PathType Leaf)) {
+                        _cp_die "'$SkillPath' does not contain a SKILL.md"
+                        return
+                    }
+                    New-Item -ItemType Directory -Path $PoolDir -Force | Out-Null
+                    $PoolEntry = Join-Path $PoolDir $SkillName
+                    if (Test-Path -LiteralPath $PoolEntry) {
+                        _cp_die "skill '$SkillName' is already registered"
+                        return
+                    }
+                    $AbsPath = (Resolve-Path -LiteralPath $SkillPath).ProviderPath
+                    if (-not (New-CPSkillLink -Source $AbsPath -Dest $PoolEntry)) {
+                        _cp_die "could not create pool link for '$SkillName'"
+                        return
+                    }
+                    Write-Host "Registered skill: $SkillName -> $AbsPath"
+                    Write-Host "Run 'claude-profile skills sync --all' to link it into unfiltered profiles."
+                }
+
+                'unregister' {
+                    $Rest = @($args | Select-Object -Skip 2)
+                    $Force = $Rest -contains '--force'
+                    $Names = @($Rest | Where-Object { $_ -ne '--force' })
+                    if ($Names.Count -ne 1) {
+                        _cp_die 'usage: claude-profile skills unregister [--force] <name>'
+                        return
+                    }
+                    $SkillName = $Names[0]
+                    if (-not (_cp_validate_skill_name $SkillName)) { return }
+                    $PoolEntry = Join-Path $PoolDir $SkillName
+                    $Item = Get-Item -LiteralPath $PoolEntry -Force -ErrorAction SilentlyContinue
+                    if (-not $Item) {
+                        _cp_die "skill '$SkillName' is not registered"
+                        return
+                    }
+                    if ($Item.LinkType) {
+                        if (-not (Remove-CPSkillLink -Path $PoolEntry)) {
+                            _cp_die "could not remove $PoolEntry"
+                            return
+                        }
+                    } else {
+                        if (-not $Force) {
+                            _cp_die "'$SkillName' is a real directory in the pool; pass --force to delete it and its contents"
+                            return
+                        }
+                        Remove-Item -LiteralPath $PoolEntry -Recurse -Force
+                    }
+                    foreach ($ProfileEntry in @(Get-ChildItem -Path $DataDir -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -ne 'skills' })) {
+                        $Manifest = Join-Path $ProfileEntry.FullName 'skills.conf'
+                        if ((Test-Path -LiteralPath $Manifest -PathType Leaf) -and
+                            (@(Read-CPSkillManifest -Path $Manifest) -contains $SkillName)) {
+                            _cp_die "note: profile '$($ProfileEntry.Name)' still lists '$SkillName' in skills.conf"
+                        }
+                    }
+                    Write-Host "Unregistered skill: $SkillName"
+                    Write-Host "Run 'claude-profile skills sync --all' to remove stale links from profiles."
+                }
+
+                { $_ -eq 'add' -or $_ -eq 'remove' } {
+                    $Op = $Sub
+                    $SkillName = if ($args.Count -gt 2) { $args[2] } else { $null }
+                    $ProfileArg = if ($args.Count -gt 3) { $args[3] } else { $null }
+                    if (-not $SkillName) {
+                        _cp_die "usage: claude-profile skills $Op <skill> [profile]"
+                        return
+                    }
+                    if ($args.Count -gt 4) {
+                        _cp_die "unexpected argument '$($args[4])'"
+                        return
+                    }
+                    if (-not (_cp_validate_skill_name $SkillName)) { return }
+                    $ProfileName = _cp_skills_profile $ProfileArg
+                    if (-not $ProfileName) { return }
+                    if ($Op -eq 'add' -and
+                        -not (Test-Path -LiteralPath (Join-Path $PoolDir $SkillName) -PathType Container)) {
+                        _cp_die "skill '$SkillName' is not in the pool. Register it with: claude-profile skills register $SkillName <path>"
+                        return
+                    }
+                    $Manifest = Join-Path (Join-Path $DataDir $ProfileName) 'skills.conf'
+                    # Materialize the implicit "all pool skills" default first
+                    # so add/remove edits stay sticky.
+                    if (-not (Test-Path -LiteralPath $Manifest -PathType Leaf)) {
+                        $All = @(Get-CPPoolSkills -PoolDir $PoolDir)
+                        [System.IO.File]::WriteAllLines($Manifest, [string[]]$All)
+                    }
+                    $Current = @(Read-CPSkillManifest -Path $Manifest)
+                    if ($Op -eq 'add') {
+                        if ($Current -notcontains $SkillName) { $Current += $SkillName }
+                    } else {
+                        $Current = @($Current | Where-Object { $_ -ne $SkillName })
+                    }
+                    [System.IO.File]::WriteAllLines($Manifest, [string[]]$Current)
+                    if (-not (Sync-CPProfileSkills -Name $ProfileName)) { return }
+                    if ($Op -eq 'add') {
+                        Write-Host "Added skill '$SkillName' to profile '$ProfileName'"
+                    } else {
+                        Write-Host "Removed skill '$SkillName' from profile '$ProfileName'"
+                    }
+                }
+
+                'set' {
+                    $ListArg = if ($args.Count -gt 2) { $args[2] } else { $null }
+                    $ProfileArg = if ($args.Count -gt 3) { $args[3] } else { $null }
+                    if (-not $ListArg) {
+                        _cp_die 'usage: claude-profile skills set <skill1,skill2,...> [profile]'
+                        return
+                    }
+                    if ($args.Count -gt 4) {
+                        _cp_die "unexpected argument '$($args[4])'"
+                        return
+                    }
+                    $ProfileName = _cp_skills_profile $ProfileArg
+                    if (-not $ProfileName) { return }
+                    $Names = @()
+                    foreach ($SkillName in ($ListArg -split ',')) {
+                        if (-not $SkillName) { continue }
+                        if (-not (_cp_validate_skill_name $SkillName)) { return }
+                        if (-not (Test-Path -LiteralPath (Join-Path $PoolDir $SkillName) -PathType Container)) {
+                            _cp_die "warning: skill '$SkillName' is not in the pool"
+                        }
+                        $Names += $SkillName
+                    }
+                    $Manifest = Join-Path (Join-Path $DataDir $ProfileName) 'skills.conf'
+                    [System.IO.File]::WriteAllLines($Manifest, [string[]]$Names)
+                    if (-not (Sync-CPProfileSkills -Name $ProfileName)) { return }
+                    Write-Host "Set skills for profile '$ProfileName'"
+                }
+
+                'reset' {
+                    $ProfileArg = if ($args.Count -gt 2) { $args[2] } else { $null }
+                    if ($args.Count -gt 3) {
+                        _cp_die "unexpected argument '$($args[3])'"
+                        return
+                    }
+                    $ProfileName = _cp_skills_profile $ProfileArg
+                    if (-not $ProfileName) { return }
+                    Remove-Item -LiteralPath (Join-Path (Join-Path $DataDir $ProfileName) 'skills.conf') -Force -ErrorAction SilentlyContinue
+                    if (-not (Sync-CPProfileSkills -Name $ProfileName)) { return }
+                    Write-Host "Profile '$ProfileName' reset to all pool skills"
+                }
+
+                'sync' {
+                    $Target = if ($args.Count -gt 2) { $args[2] } else { $null }
+                    if ($args.Count -gt 3) {
+                        _cp_die "unexpected argument '$($args[3])'"
+                        return
+                    }
+                    if ($Target -eq '--all') {
+                        foreach ($ProfileEntry in @(Get-ChildItem -Path $DataDir -Directory -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -ne 'skills' })) {
+                            Sync-CPProfileSkills -Name $ProfileEntry.Name | Out-Null
+                            Write-Host "Synced profile '$($ProfileEntry.Name)'"
+                        }
+                    } else {
+                        $ProfileName = _cp_skills_profile $Target
+                        if (-not $ProfileName) { return }
+                        if (-not (Sync-CPProfileSkills -Name $ProfileName)) { return }
+                        Write-Host "Synced profile '$ProfileName'"
+                    }
+                }
+
+                $null {
+                    if (-not (Test-Path -LiteralPath $PoolDir -PathType Container)) {
+                        Write-Host 'No skill pool yet. Register a skill with: claude-profile skills register <name> <path>'
+                        return
+                    }
+                    $ProfileName = _cp_skills_profile $null
+                    if (-not $ProfileName) { return }
+                    $ProfileDir = Join-Path $DataDir $ProfileName
+                    if (Test-Path -LiteralPath (Join-Path $ProfileDir 'skills.conf') -PathType Leaf) {
+                        Write-Host "Profile '$ProfileName': skills.conf present (filtered)"
+                    } else {
+                        Write-Host "Profile '$ProfileName': no skills.conf (all pool skills)"
+                    }
+                    Write-Host "Skill pool: $PoolDir"
+                    $Desired = @(Get-CPDesiredSkills -ProfileDir $ProfileDir -PoolDir $PoolDir)
+                    $Pool = @(Get-CPPoolSkills -PoolDir $PoolDir)
+                    if ($Pool.Count -eq 0) {
+                        Write-Host '  (pool is empty)'
+                        return
+                    }
+                    foreach ($SkillName in $Pool) {
+                        $PoolEntry = Join-Path $PoolDir $SkillName
+                        $Dest = Join-Path (Join-Path $ProfileDir 'skills') $SkillName
+                        $DestItem = Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+                        $Status = 'not linked'
+                        if (-not (Test-Path -LiteralPath $PoolEntry -PathType Container)) {
+                            $Status = 'dangling (target missing)'
+                        } elseif ($DestItem) {
+                            if (Test-CPManagedSkillLink -Path $Dest -PoolDir $PoolDir) {
+                                $Status = 'linked'
+                            } else {
+                                $Status = 'conflict (unmanaged entry)'
+                            }
+                        } elseif ($Desired -contains $SkillName) {
+                            $Status = 'selected, not linked (run sync)'
+                        }
+                        Write-Host ("  {0,-24} {1}" -f $SkillName, $Status)
+                    }
+                }
+
+                default {
+                    _cp_die "unknown skills command '$Sub'. Run 'claude-profile help' for usage."
+                    return
+                }
+            }
+        }
+
         'version' {
             Write-Host (Get-CPInstalledVersion)
         }
@@ -791,6 +1255,20 @@ Commands:
                             directory-local profile for the current directory
     auto [on|off|status]    Control directory-local auto-switching
     which [name]            Show the resolved config directory path
+    skills                  List pool skills and their status for the profile
+    skills register <name> <path>
+                            Add a skill directory to the shared pool
+    skills unregister [--force] <name>
+                            Remove a skill from the pool
+    skills add <skill> [profile]
+                            Add a pool skill to a profile
+    skills remove <skill> [profile]
+                            Remove a pool skill from a profile
+    skills set <s1,s2,...> [profile]
+                            Replace a profile's skill selection
+    skills reset [profile]  Back to the default (all pool skills)
+    skills sync [profile|--all]
+                            Re-materialize skill links
     version                 Show the installed version
     update [--force]        Update to the latest release
     delete <name>           Delete a profile
@@ -806,8 +1284,15 @@ any .claude-profile until 'claude-profile auto on'. Set
 CLAUDE_PROFILE_NO_AUTO_SWITCH=1 to disable, CLAUDE_PROFILE_AUTO_QUIET=1
 to switch silently.
 
+Skills: a shared pool at <data-dir>\skills holds registered skills. A
+profile's skills.conf (one name per line, # comments) selects the subset
+linked into <profile>\skills; without one the profile gets every pool
+skill. Hand-made entries in <profile>\skills are never touched.
+
 Examples:
     claude-profile create work
+    claude-profile skills register humanize C:\skills\humanize
+    claude-profile skills set humanize,optimize work
     claude-profile default work
     claude-profile use work
     claude                          # runs with "work" profile
@@ -851,6 +1336,22 @@ Examples:
                 Write-Host "Default profile: $CurDefault"
             } else {
                 Write-Host 'No default profile set'
+            }
+            # Skills annotation for the active (else default) profile;
+            # silent until a skill pool exists.
+            $PoolDir = Join-Path $DataDir 'skills'
+            if (Test-Path -LiteralPath $PoolDir -PathType Container) {
+                $SkillProfile = if ($Active) { $Active } else { $CurDefault }
+                if ($SkillProfile -and (Test-Path (Join-Path $DataDir $SkillProfile) -PathType Container)) {
+                    $PoolCount = @(Get-CPPoolSkills -PoolDir $PoolDir).Count
+                    $Manifest = Join-Path (Join-Path $DataDir $SkillProfile) 'skills.conf'
+                    if (Test-Path -LiteralPath $Manifest -PathType Leaf) {
+                        $SkillCount = @(Read-CPSkillManifest -Path $Manifest).Count
+                        Write-Host "Skills: $SkillCount of $PoolCount pool skills (filtered)"
+                    } else {
+                        Write-Host "Skills: all pool skills ($PoolCount)"
+                    }
+                }
             }
         }
 
