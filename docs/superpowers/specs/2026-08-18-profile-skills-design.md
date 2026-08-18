@@ -34,6 +34,12 @@ commands to materialize that selection as links.
   contain a `SKILL.md`.
 - Pool entry names follow the existing profile-name validation:
   `[A-Za-z0-9_-]+`, no leading `.`, no `/`, `\`, or `..`.
+- The profile name `skills` is reserved (case-insensitively, since the
+  Windows data directory is case-insensitive) in all three validators and
+  in the `.claude-profile` resolvers. If `<data-root>/skills` exists but
+  looks like a pre-reservation profile (contains `settings.json` or
+  `.credentials.json`), every pool operation and sync refuses with an
+  error telling the user to move that profile aside.
 
 ### Manifest (`<profile>/skills.conf`)
 
@@ -44,8 +50,13 @@ commands to materialize that selection as links.
   compatible default).
 - **File present but empty** (or only comments) = explicitly **no**
   pool skills.
+- **File present but unreadable** = error; sync aborts rather than
+  treating it as "select nothing" and stripping the profile's links.
 - Names are validated with the same rule as pool entries; invalid
   lines are skipped with a warning.
+- Manifests may be CRLF (written by the cmd/PowerShell implementations
+  into the shared Windows data directory); all readers and the sh
+  add/remove editors strip CR before comparing.
 
 ### Managed vs unmanaged entries
 
@@ -92,8 +103,10 @@ Identical across `claude-profile.sh`, `claude-profile-init.ps1`, and
 - `use` and directory-local auto-switching are untouched: profile
   switching remains a pure environment-variable change with no
   filesystem work on the bash per-prompt hot path.
-- `claude-profile` (status) and `list` gain a skills annotation:
-  `skills: all` (no manifest) or `skills: N/M (filtered)`.
+- `claude-profile` (status) shows `Skills: all pool skills (M)` or
+  `Skills: N of M pool skills (filtered)` once a pool exists; `list`
+  appends `[skills: N/M]` to profiles that have a manifest (unfiltered
+  profiles stay unannotated to keep the listing quiet).
 - `help` documents the new subcommands.
 
 ## Per-implementation notes
@@ -104,8 +117,11 @@ Identical across `claude-profile.sh`, `claude-profile-init.ps1`, and
   delegated to `cmd //c mklink /J` with `cygpath -w` paths so links
   are junctions readable by the cmd and PowerShell implementations.
   Managed-link detection on MSYS2 compares the junction target (via
-  `cygpath -u` of the reparse target as reported by `readlink` on
-  MSYS, falling back to `cmd //c dir` parsing only if needed).
+  `cygpath -u` of the reparse target as reported by `readlink`). If
+  `readlink` cannot read a junction, the link is treated as unmanaged —
+  a deliberately non-destructive degradation (links are left alone and
+  reported as conflicts) rather than an untestable `cmd //c dir`
+  parsing fallback.
 - **PowerShell** (`claude-profile-init.ps1`): `New-Item -ItemType
   Junction` on Windows, `-ItemType SymbolicLink` elsewhere. Managed
   detection via the item's `LinkType`/`Target` properties. Manual

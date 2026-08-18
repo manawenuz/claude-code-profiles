@@ -499,12 +499,36 @@ if not exist "%DATA_DIR%\!_sp_name!\" (
 )
 exit /b 0
 
+:: pool_guard -> errorlevel 1 when %DATA_DIR%\skills exists but looks like
+:: a Claude Code profile (a profile named 'skills' created before that
+:: name was reserved). Without this, pool operations would enumerate its
+:: internals as skills and link them into every profile.
+:pool_guard
+if not exist "%DATA_DIR%\skills\" exit /b 0
+if exist "%DATA_DIR%\skills\settings.json" goto :pool_guard_fail
+if exist "%DATA_DIR%\skills\.credentials.json" goto :pool_guard_fail
+exit /b 0
+:pool_guard_fail
+echo claude-profile: %DATA_DIR%\skills looks like a Claude Code profile, not a skill pool ^(the name 'skills' is now reserved^). Move that profile aside before using skill pools. >&2
+exit /b 1
+
 :: sync_profile <name> -> re-materializes managed skill junctions for the
 :: profile from its manifest (or the whole pool when no manifest).
 :sync_profile
+call :pool_guard
+if errorlevel 1 exit /b 1
 set "_sy_pool=%DATA_DIR%\skills"
 set "_sy_pdir=%DATA_DIR%\%~1"
 set "_sy_sdir=!_sy_pdir!\skills"
+:: A manifest that exists but can't be read must abort, not silently
+:: become "select nothing" and strip the profile's managed links.
+if exist "!_sy_pdir!\skills.conf" (
+    type "!_sy_pdir!\skills.conf" >nul 2>&1
+    if errorlevel 1 (
+        echo claude-profile: cannot read !_sy_pdir!\skills.conf; not syncing >&2
+        exit /b 1
+    )
+)
 call :desired_skills "!_sy_pdir!"
 if not exist "!_sy_sdir!\" mkdir "!_sy_sdir!" >nul 2>&1
 if not exist "!_sy_sdir!\" (
@@ -1002,6 +1026,8 @@ exit /b 0
 
 :cmd_skills
 set "_sk_pool=%DATA_DIR%\skills"
+call :pool_guard
+if errorlevel 1 exit /b 1
 if "%~1"=="" goto :cmd_skills_list
 if /i "%~1"=="register"   goto :cmd_skills_register
 if /i "%~1"=="unregister" goto :cmd_skills_unregister
@@ -1081,21 +1107,18 @@ set "_vs_name=!_sk_name!"
 call :validate_skill_name
 if errorlevel 1 exit /b 1
 set "_sk_entry=!_sk_pool!\!_sk_name!"
-:: `if exist` resolves links, so a dangling junction reads as absent; the
-:: dir /AL scan still sees the entry itself and lets it be unregistered.
-set "_sk_present=0"
-if exist "!_sk_entry!" set "_sk_present=1"
-if exist "!_sk_entry!\" set "_sk_present=1"
-for /f "usebackq delims=" %%e in (`dir /AL /B "!_sk_pool!" 2^>nul ^| findstr /X /C:"!_sk_name!" 2^>nul`) do set "_sk_present=1"
-if "!_sk_present!"=="0" (
-    echo claude-profile: skill '!_sk_name!' is not registered >&2
-    exit /b 1
-)
-:: A bare rmdir removes a junction (or an empty real directory) without
-:: touching its target; a non-empty real directory survives it and needs
-:: an explicit --force to be deleted recursively.
-rmdir "!_sk_entry!" >nul 2>&1
-if exist "!_sk_entry!\" (
+:: Detect link-ness FIRST (never probe by deleting). `if exist` resolves
+:: links, so a dangling junction reads as absent — the dir /AL scan still
+:: sees the entry itself and lets it be unregistered.
+set "_sk_islink=0"
+for /f "usebackq delims=" %%e in (`dir /AL /B "!_sk_pool!" 2^>nul ^| findstr /X /C:"!_sk_name!" 2^>nul`) do set "_sk_islink=1"
+if "!_sk_islink!"=="1" (
+    rmdir "!_sk_entry!" >nul 2>&1
+    if exist "!_sk_entry!\" (
+        echo claude-profile: could not remove !_sk_entry! >&2
+        exit /b 1
+    )
+) else if exist "!_sk_entry!\" (
     if "!_sk_force!"=="0" (
         echo claude-profile: '!_sk_name!' is a real directory in the pool; pass --force to delete it and its contents >&2
         exit /b 1
@@ -1105,6 +1128,9 @@ if exist "!_sk_entry!\" (
         echo claude-profile: could not remove !_sk_entry! >&2
         exit /b 1
     )
+) else (
+    echo claude-profile: skill '!_sk_name!' is not registered >&2
+    exit /b 1
 )
 for /d %%d in ("%DATA_DIR%\*") do (
     if /i not "%%~nxd"=="skills" if exist "%%d\skills.conf" (
@@ -1182,6 +1208,12 @@ if not "%~4"=="" (
 call :skills_profile "%~3"
 if errorlevel 1 exit /b 1
 set "_sk_listarg=%~2"
+:: Reject anything but names and commas up front: a bare `for %%n in (...)`
+:: would otherwise glob-expand wildcards against the current directory.
+echo !_sk_listarg!| findstr /R "^[a-zA-Z0-9_,-][a-zA-Z0-9_,-]*$" >nul 2>&1 || (
+    echo claude-profile: invalid skill list '%~2': use comma-separated names ^(letters, digits, hyphens, underscores^) >&2
+    exit /b 1
+)
 set "_sk_manifest=%DATA_DIR%\!_sp_name!\skills.conf"
 set "_sk_tmp=!_sk_manifest!.tmp.%RANDOM%"
 set "_sk_bad=0"

@@ -389,18 +389,17 @@ function Get-CPLinkTarget {
 
 # Removes a link without touching its target. FileSystemInfo.Delete() is
 # non-recursive, so on a junction it removes only the reparse point.
+# Deliberately NO Remove-Item fallback: on Windows PowerShell 5.1,
+# Remove-Item on a junction follows the reparse point and deletes the
+# TARGET's contents (fixed only in PS 6.2+) — failing here must never
+# escalate into deleting the user's skill source.
 function Remove-CPSkillLink {
     param([string]$Path)
     try {
         (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Delete()
         return $true
     } catch {
-        try {
-            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
-            return $true
-        } catch {
-            return $false
-        }
+        return $false
     }
 }
 
@@ -412,7 +411,12 @@ function Test-CPManagedSkillLink {
     if (-not $target) { return $false }
     $normTarget = $target.Replace('\', '/').TrimEnd('/')
     $normPool = $PoolDir.Replace('\', '/').TrimEnd('/')
-    return $normTarget.StartsWith("$normPool/")
+    # Windows paths are case-insensitive; %LOCALAPPDATA% casing can differ
+    # between the shell that created a junction and this one.
+    if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+        return $normTarget.StartsWith("$normPool/", [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return $normTarget.StartsWith("$normPool/", [System.StringComparison]::Ordinal)
 }
 
 # Returns the valid skill names from manifest file $Path. Blank lines and
@@ -461,6 +465,21 @@ function Get-CPDesiredSkills {
     return @(Get-CPPoolSkills -PoolDir $PoolDir)
 }
 
+# Fails when <data>/skills exists but looks like a Claude Code profile —
+# i.e. a profile named 'skills' created before that name was reserved.
+# Without this, pool operations would enumerate its internals as skills
+# and link them into every profile.
+function Test-CPPoolGuard {
+    $poolDir = Join-Path (Get-CPDataDir) 'skills'
+    if (-not (Test-Path -LiteralPath $poolDir -PathType Container)) { return $true }
+    if ((Test-Path -LiteralPath (Join-Path $poolDir 'settings.json') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $poolDir '.credentials.json') -PathType Leaf)) {
+        $host.UI.WriteErrorLine("claude-profile: $poolDir looks like a Claude Code profile, not a skill pool (the name 'skills' is now reserved). Move that profile aside before using skill pools.")
+        return $false
+    }
+    return $true
+}
+
 # Re-materializes managed skill links for profile $Name from its manifest
 # (or the whole pool when no manifest).
 function Sync-CPProfileSkills {
@@ -469,6 +488,18 @@ function Sync-CPProfileSkills {
     $poolDir = Join-Path $dataDir 'skills'
     $profileDir = Join-Path $dataDir $Name
     $skillsDir = Join-Path $profileDir 'skills'
+    if (-not (Test-CPPoolGuard)) { return $false }
+    # A manifest that exists but can't be read must abort, not silently
+    # become "select nothing" and strip the profile's managed links.
+    $manifest = Join-Path $profileDir 'skills.conf'
+    if (Test-Path -LiteralPath $manifest -PathType Leaf) {
+        try {
+            [void](Get-Content -LiteralPath $manifest -ErrorAction Stop)
+        } catch {
+            $host.UI.WriteErrorLine("claude-profile: cannot read ${manifest}; not syncing")
+            return $false
+        }
+    }
     $desired = @(Get-CPDesiredSkills -ProfileDir $profileDir -PoolDir $poolDir)
     try {
         New-Item -ItemType Directory -Path $skillsDir -Force -ErrorAction Stop | Out-Null
@@ -933,6 +964,7 @@ function claude-profile {
 
         'skills' {
             $PoolDir = Join-Path $DataDir 'skills'
+            if (-not (Test-CPPoolGuard)) { return }
             $Sub = if ($args.Count -gt 1) { $args[1] } else { $null }
             switch ($Sub) {
                 'register' {

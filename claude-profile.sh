@@ -66,7 +66,9 @@ _cp_validate_name() {
             _cp_die "invalid profile name '$1': use only letters, digits, hyphens, underscores"
             return 1
             ;;
-        skills)
+        [Ss][Kk][Ii][Ll][Ll][Ss])
+            # Case-insensitive: on Windows filesystems (Git Bash) 'SKILLS'
+            # resolves to the same directory as the pool.
             _cp_die "profile name 'skills' is reserved for the skill pool"
             return 1
             ;;
@@ -205,6 +207,20 @@ _cp_skills_materialize_manifest() {
     _cp_pool_skills "${_cp_data}/skills" > "$1/skills.conf"
 }
 
+# Fails when <data>/skills exists but looks like a Claude Code profile —
+# i.e. a profile named 'skills' created before that name was reserved.
+# Without this, pool operations would enumerate its internals as skills
+# and link them into every profile.
+_cp_pool_guard() {
+    _cp_pg_pool="${_cp_data}/skills"
+    [ -d "$_cp_pg_pool" ] || return 0
+    if [ -f "${_cp_pg_pool}/settings.json" ] || [ -f "${_cp_pg_pool}/.credentials.json" ]; then
+        _cp_die "${_cp_pg_pool} looks like a Claude Code profile, not a skill pool (the name 'skills' is now reserved). Move that profile aside before using skill pools."
+        return 1
+    fi
+    return 0
+}
+
 # Re-materializes managed skill links for profile NAME ($1) from its
 # manifest (or the whole pool when no manifest). Uses $_cp_data.
 _cp_skills_sync_one() {
@@ -212,6 +228,13 @@ _cp_skills_sync_one() {
     _cp_ss_pool="${_cp_data}/skills"
     _cp_ss_pdir="${_cp_data}/${_cp_ss_name}"
     _cp_ss_sdir="${_cp_ss_pdir}/skills"
+    _cp_pool_guard || return 1
+    # A manifest that exists but can't be read must abort, not silently
+    # become "select nothing" and strip the profile's managed links.
+    if [ -f "${_cp_ss_pdir}/skills.conf" ] && [ ! -r "${_cp_ss_pdir}/skills.conf" ]; then
+        _cp_die "cannot read ${_cp_ss_pdir}/skills.conf; not syncing"
+        return 1
+    fi
     _cp_ss_desired=$(_cp_desired_skills "$_cp_ss_pdir" "$_cp_ss_pool")
     mkdir -p "$_cp_ss_sdir" 2>/dev/null || { _cp_die "cannot create ${_cp_ss_sdir}"; return 1; }
 
@@ -730,7 +753,7 @@ _cp_auto_switch() {
     fi
 
     case "$_cp_dotname" in
-        skills|.*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
+        [Ss][Kk][Ii][Ll][Ll][Ss]|.*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
             _cp_die "ignoring ${_cp_dotfile}: invalid profile name '${_cp_dotname}'"
             return 1
             ;;
@@ -1177,6 +1200,7 @@ SETTINGSEOF
         skills)
             shift
             _cp_sk_pool="${_cp_data}/skills"
+            _cp_pool_guard || return 1
             case "${1:-}" in
                 register)
                     shift
@@ -1261,8 +1285,11 @@ SETTINGSEOF
                         _cp_sk_pn="${_cp_sk_p%/}"
                         _cp_sk_pn="${_cp_sk_pn##*/}"
                         [ "$_cp_sk_pn" = "skills" ] && continue
+                        # Read via _cp_read_manifest so CRLF manifests
+                        # written by the cmd/PowerShell implementations
+                        # still match.
                         if [ -f "${_cp_sk_p%/}/skills.conf" ] \
-                            && grep -qx "$_cp_sk_name" "${_cp_sk_p%/}/skills.conf" 2>/dev/null; then
+                            && _cp_read_manifest "${_cp_sk_p%/}/skills.conf" 2>/dev/null | grep -Fqx "$_cp_sk_name"; then
                             _cp_die "note: profile '${_cp_sk_pn}' still lists '${_cp_sk_name}' in skills.conf"
                         fi
                     done
@@ -1291,14 +1318,23 @@ SETTINGSEOF
                     fi
                     _cp_skills_materialize_manifest "$_cp_sk_pdir" || { _cp_die "could not write skills.conf"; return 1; }
                     _cp_sk_file="${_cp_sk_pdir}/skills.conf"
+                    # Membership and removal go through CR/whitespace
+                    # trimming (not bare grep -x) so CRLF manifests written
+                    # by the cmd/PowerShell implementations still match.
                     if [ "$_cp_sk_op" = "add" ]; then
-                        if ! grep -qx "$_cp_sk_name" "$_cp_sk_file" 2>/dev/null; then
+                        if ! _cp_read_manifest "$_cp_sk_file" 2>/dev/null | grep -Fqx "$_cp_sk_name"; then
                             printf '%s\n' "$_cp_sk_name" >> "$_cp_sk_file" || return 1
                         fi
                         _cp_skills_sync_one "$_cp_sp_name" || return 1
                         printf "Added skill '%s' to profile '%s'\n" "$_cp_sk_name" "$_cp_sp_name"
                     else
-                        grep -vx "$_cp_sk_name" "$_cp_sk_file" > "${_cp_sk_file}.tmp.$$" 2>/dev/null
+                        awk -v n="$_cp_sk_name" '{
+                            l = $0
+                            sub(/\r$/, "", l)
+                            gsub(/^[ \t]+/, "", l); gsub(/[ \t]+$/, "", l)
+                            if (l == n) next
+                            print
+                        }' "$_cp_sk_file" > "${_cp_sk_file}.tmp.$$" 2>/dev/null
                         mv -f "${_cp_sk_file}.tmp.$$" "$_cp_sk_file" || { rm -f "${_cp_sk_file}.tmp.$$"; return 1; }
                         _cp_skills_sync_one "$_cp_sp_name" || return 1
                         printf "Removed skill '%s' from profile '%s'\n" "$_cp_sk_name" "$_cp_sp_name"

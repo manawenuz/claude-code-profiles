@@ -185,9 +185,10 @@ How it works:
   `claude-profile skills sync --all` to propagate.
 - The profile name `skills` is reserved for the pool directory.
 
-`claude-profile` status and `list` output annotate filtered profiles, e.g.
-`skills: 3/12 (filtered)`. (cmd.exe has no bare status command, so there
-the annotation appears in `list` only.)
+Filtered profiles are annotated in `claude-profile list` (e.g.
+`work [skills: 3/12]`) and in the bare `claude-profile` status output
+(`Skills: 3 of 12 pool skills (filtered)`). (cmd.exe has no bare status
+command, so there the annotation appears in `list` only.)
 
 ### Profile Storage
 
