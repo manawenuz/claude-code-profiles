@@ -38,35 +38,276 @@ _cp_data_dir() {
     printf '%s\n' "${XDG_DATA_HOME:-${HOME}/.local/share}/claude-profiles"
 }
 
-_cp_validate_name() {
+# Shared name validation for profiles and skills; $2 is the noun used in
+# error messages so both validators stay rule-identical by construction.
+_cp_validate_name_core() {
     case "$1" in
         "")
-            _cp_die "profile name must not be empty"
+            _cp_die "$2 name must not be empty"
             return 1
             ;;
         .*)
-            _cp_die "invalid profile name '$1': must not start with '.'"
+            _cp_die "invalid $2 name '$1': must not start with '.'"
             return 1
             ;;
         *..*)
-            _cp_die "invalid profile name '$1': must not contain '..'"
+            _cp_die "invalid $2 name '$1': must not contain '..'"
             return 1
             ;;
         */*)
-            _cp_die "invalid profile name '$1': must not contain '/'"
+            _cp_die "invalid $2 name '$1': must not contain '/'"
             return 1
             ;;
         *\\*)
-            _cp_die "invalid profile name '$1': must not contain '\\'"
+            _cp_die "invalid $2 name '$1': must not contain '\\'"
             return 1
             ;;
     esac
     case "$1" in
         *[!A-Za-z0-9_-]*)
-            _cp_die "invalid profile name '$1': use only letters, digits, hyphens, underscores"
+            _cp_die "invalid $2 name '$1': use only letters, digits, hyphens, underscores"
             return 1
             ;;
     esac
+}
+
+_cp_validate_name() {
+    _cp_validate_name_core "$1" profile || return 1
+    case "$1" in
+        [Ss][Kk][Ii][Ll][Ll][Ss])
+            # Case-insensitive: on Windows filesystems (Git Bash) 'SKILLS'
+            # resolves to the same directory as the pool.
+            _cp_die "profile name 'skills' is reserved for the skill pool"
+            return 1
+            ;;
+    esac
+}
+
+# --- Skill pool helpers ---
+#
+# A central pool at <data-root>/skills holds registered skills (directories
+# or links to skill source directories). Each profile may carry a
+# skills.conf manifest (one pool-skill name per line, # comments) naming
+# the subset it wants; no manifest means every pool skill. Sync
+# materializes the selection as links in <profile>/skills. Only links
+# whose target lies under the pool are ever created or removed — hand-made
+# links, real directories, and files are left alone.
+
+_cp_validate_skill_name() {
+    _cp_validate_name_core "$1" skill
+}
+
+# Returns 0 when link target $1 lies under pool directory $2. Case-folds
+# on MSYS because the shared Windows data directory is case-insensitive
+# and %LOCALAPPDATA% casing can differ between the shell that created a
+# junction and this one (matches the cmd `if /i` and ps1
+# OrdinalIgnoreCase behavior).
+_cp_target_in_pool() {
+    if _cp_is_msys; then
+        _cp_tip_t=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+        _cp_tip_p=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+    else
+        _cp_tip_t="$1"
+        _cp_tip_p="$2"
+    fi
+    case "$_cp_tip_t" in
+        "$_cp_tip_p"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Prints the literal target of link $1 (fails if not a link). On MSYS the
+# junction target may come back as a Windows path; normalize via cygpath
+# so prefix comparison against the pool directory works.
+_cp_link_target() {
+    _cp_lt_t=$(readlink "$1" 2>/dev/null) || return 1
+    [ -n "$_cp_lt_t" ] || return 1
+    if _cp_is_msys && command -v cygpath >/dev/null 2>&1; then
+        case "$_cp_lt_t" in
+            [A-Za-z]:*|*\\*) _cp_lt_t=$(cygpath -u "$_cp_lt_t" 2>/dev/null) ;;
+        esac
+    fi
+    printf '%s\n' "$_cp_lt_t"
+}
+
+# Creates a link at $2 pointing to directory $1. Uses a directory junction
+# on MSYS (no admin rights needed, readable by the cmd and PowerShell
+# implementations), a plain symlink everywhere else.
+_cp_make_link() {
+    if _cp_is_msys && command -v cygpath >/dev/null 2>&1; then
+        _cp_ml_src=$(cygpath -w "$1" 2>/dev/null) || _cp_ml_src=""
+        _cp_ml_dst=$(cygpath -w "$2" 2>/dev/null) || _cp_ml_dst=""
+        if [ -n "$_cp_ml_src" ] && [ -n "$_cp_ml_dst" ]; then
+            cmd //c mklink /J "$_cp_ml_dst" "$_cp_ml_src" >/dev/null 2>&1 && return 0
+        fi
+        return 1
+    fi
+    ln -s "$1" "$2" 2>/dev/null
+}
+
+# Removes a link without touching its target (junctions need rmdir).
+_cp_remove_link() {
+    rm -f "$1" 2>/dev/null || rmdir "$1" 2>/dev/null
+}
+
+# Prints the valid skill names from manifest file $1, one per line.
+# Blank lines and # comments are skipped; invalid names warn and are
+# skipped so one bad line never fails a whole sync.
+_cp_read_manifest() {
+    while IFS= read -r _cp_rm_line || [ -n "$_cp_rm_line" ]; do
+        _cp_rm_line="${_cp_rm_line%"$_CP_CR"}"
+        while :; do
+            case "$_cp_rm_line" in
+                " "*|"	"*) _cp_rm_line="${_cp_rm_line#?}" ;;
+                *" "|*"	") _cp_rm_line="${_cp_rm_line%?}" ;;
+                *) break ;;
+            esac
+        done
+        case "$_cp_rm_line" in
+            ''|'#'*) continue ;;
+            .*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
+                _cp_die "skills.conf: ignoring invalid skill name '${_cp_rm_line}'"
+                continue
+                ;;
+        esac
+        printf '%s\n' "$_cp_rm_line"
+    done < "$1"
+    return 0
+}
+
+# Prints the names of every skill registered in pool directory $1.
+# Includes dangling registrations (link whose source is gone) so listings
+# can report them and sync can warn.
+_cp_pool_skills() {
+    [ -d "$1" ] || return 0
+    # The ls guard keeps zsh's nomatch from aborting on an empty glob.
+    [ -n "$(ls "$1" 2>/dev/null)" ] || return 0
+    for _cp_ps_e in "$1"/*; do
+        [ -d "$_cp_ps_e" ] || [ -L "$_cp_ps_e" ] || continue
+        printf '%s\n' "${_cp_ps_e##*/}"
+    done
+    return 0
+}
+
+# Prints the desired skill set for profile directory $1 against pool $2:
+# the manifest names when skills.conf exists, every pool skill otherwise.
+_cp_desired_skills() {
+    if [ -f "$1/skills.conf" ]; then
+        _cp_read_manifest "$1/skills.conf"
+    else
+        _cp_pool_skills "$2"
+    fi
+}
+
+# Ensures profile directory $1 has a concrete skills.conf, materializing
+# the implicit "all pool skills" default first so add/remove edits stay
+# sticky instead of silently narrowing "all" to one skill.
+_cp_skills_materialize_manifest() {
+    [ -f "$1/skills.conf" ] && return 0
+    _cp_pool_skills "${_cp_data}/skills" > "$1/skills.conf"
+}
+
+# Fails when <data>/skills exists but looks like a Claude Code profile —
+# i.e. a profile named 'skills' created before that name was reserved.
+# Without this, pool operations would enumerate its internals as skills
+# and link them into every profile.
+_cp_pool_guard() {
+    _cp_pg_pool="${_cp_data}/skills"
+    [ -d "$_cp_pg_pool" ] || return 0
+    if [ -f "${_cp_pg_pool}/settings.json" ] || [ -f "${_cp_pg_pool}/.credentials.json" ]; then
+        _cp_die "${_cp_pg_pool} looks like a Claude Code profile, not a skill pool (the name 'skills' is now reserved). Move that profile aside before using skill pools."
+        return 1
+    fi
+    return 0
+}
+
+# Re-materializes managed skill links for profile NAME ($1) from its
+# manifest (or the whole pool when no manifest). Uses $_cp_data.
+_cp_skills_sync_one() {
+    _cp_ss_name="$1"
+    _cp_ss_pool="${_cp_data}/skills"
+    _cp_ss_pdir="${_cp_data}/${_cp_ss_name}"
+    _cp_ss_sdir="${_cp_ss_pdir}/skills"
+    _cp_pool_guard || return 1
+    # A manifest that exists but can't be read must abort, not silently
+    # become "select nothing" and strip the profile's managed links.
+    if [ -f "${_cp_ss_pdir}/skills.conf" ] && [ ! -r "${_cp_ss_pdir}/skills.conf" ]; then
+        _cp_die "cannot read ${_cp_ss_pdir}/skills.conf; not syncing"
+        return 1
+    fi
+    _cp_ss_desired=$(_cp_desired_skills "$_cp_ss_pdir" "$_cp_ss_pool")
+    mkdir -p "$_cp_ss_sdir" 2>/dev/null || { _cp_die "cannot create ${_cp_ss_sdir}"; return 1; }
+
+    # Pass 1: drop managed links that are dangling or no longer desired.
+    # The ls guard keeps zsh's nomatch from aborting on an empty glob.
+    [ -n "$(ls "$_cp_ss_sdir" 2>/dev/null)" ] && for _cp_ss_e in "$_cp_ss_sdir"/*; do
+        [ -L "$_cp_ss_e" ] || continue
+        _cp_ss_t=$(_cp_link_target "$_cp_ss_e") || continue
+        _cp_target_in_pool "$_cp_ss_t" "$_cp_ss_pool" || continue
+        _cp_ss_b="${_cp_ss_e##*/}"
+        if [ ! -d "${_cp_ss_pool}/${_cp_ss_b}" ] \
+            || ! printf '%s\n' "$_cp_ss_desired" | grep -Fqx "$_cp_ss_b"; then
+            _cp_remove_link "$_cp_ss_e" || _cp_die "could not remove ${_cp_ss_e}"
+        fi
+    done
+
+    # Pass 2: create links missing from the desired set.
+    [ -n "$_cp_ss_desired" ] || return 0
+    printf '%s\n' "$_cp_ss_desired" | while IFS= read -r _cp_ss_want; do
+        [ -n "$_cp_ss_want" ] || continue
+        if [ ! -d "${_cp_ss_pool}/${_cp_ss_want}" ]; then
+            _cp_die "skill '${_cp_ss_want}' is not in the pool (or its source is gone); skipping"
+            continue
+        fi
+        _cp_ss_dst="${_cp_ss_sdir}/${_cp_ss_want}"
+        if [ -L "$_cp_ss_dst" ]; then
+            _cp_ss_t=$(_cp_link_target "$_cp_ss_dst")
+            if _cp_target_in_pool "$_cp_ss_t" "$_cp_ss_pool"; then
+                continue
+            fi
+            _cp_die "skill '${_cp_ss_want}': unmanaged entry already at ${_cp_ss_dst}; skipping"
+            continue
+        fi
+        if [ -e "$_cp_ss_dst" ]; then
+            _cp_die "skill '${_cp_ss_want}': unmanaged entry already at ${_cp_ss_dst}; skipping"
+            continue
+        fi
+        _cp_make_link "${_cp_ss_pool}/${_cp_ss_want}" "$_cp_ss_dst" \
+            || _cp_die "could not link skill '${_cp_ss_want}'"
+    done
+    return 0
+}
+
+# Resolves the profile a skills command acts on into _cp_sp_name: the
+# explicit argument $1 if given, else the active profile, else the
+# default. Uses $_cp_data / $_cp_default_file.
+_cp_skills_profile() {
+    if [ -n "${1:-}" ]; then
+        _cp_validate_name "$1" || return 1
+        _cp_sp_name="$1"
+    elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        case "$CLAUDE_CONFIG_DIR" in
+            "${_cp_data}"/*) _cp_sp_name="${CLAUDE_CONFIG_DIR##*/}" ;;
+            *)
+                _cp_die "active CLAUDE_CONFIG_DIR is not a managed profile; pass a profile name"
+                return 1
+                ;;
+        esac
+    elif [ -f "$_cp_default_file" ]; then
+        _cp_sp_name=$(cat "$_cp_default_file")
+        if [ -z "$_cp_sp_name" ]; then
+            _cp_die "no profile specified and no default profile set"
+            return 1
+        fi
+    else
+        _cp_die "no profile specified and no default profile set"
+        return 1
+    fi
+    if [ ! -d "${_cp_data}/${_cp_sp_name}" ]; then
+        _cp_die "profile '${_cp_sp_name}' does not exist"
+        return 1
+    fi
+    return 0
 }
 
 # --- Version tracking helpers ---
@@ -508,7 +749,7 @@ _cp_auto_switch() {
     fi
 
     case "$_cp_dotname" in
-        .*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
+        [Ss][Kk][Ii][Ll][Ll][Ss]|.*|*..*|*/*|*\\*|*[!A-Za-z0-9_-]*)
             _cp_die "ignoring ${_cp_dotfile}: invalid profile name '${_cp_dotname}'"
             return 1
             ;;
@@ -759,6 +1000,11 @@ claude-profile() {
             mkdir -p "$_cp_dir"
             printf 'Created profile: %s\n' "$_cp_name"
             printf 'Config directory: %s\n' "$_cp_dir"
+            # A new profile has no manifest, so this links every pool skill
+            # (the backward-compatible "all" default). No pool: no-op.
+            if [ -d "${_cp_data}/skills" ]; then
+                _cp_skills_sync_one "$_cp_name"
+            fi
             if [ "$_cp_do_init" -eq 1 ]; then
                 _cp_settings="${_cp_dir}/settings.json"
                 cat > "$_cp_settings" <<'SETTINGSEOF'
@@ -815,10 +1061,17 @@ SETTINGSEOF
                 esac
             fi
             _cp_found=0
+            _cp_pool_n=$(_cp_pool_skills "${_cp_data}/skills" | grep -c .)
             for _cp_entry in "$_cp_data"/*/; do
                 [ -d "$_cp_entry" ] || continue
                 _cp_entry_name=$(basename "$_cp_entry")
+                [ "$_cp_entry_name" = "skills" ] && continue
                 _cp_found=1
+                _cp_sk_note=""
+                if [ -f "${_cp_entry%/}/skills.conf" ]; then
+                    _cp_sk_n=$(_cp_read_manifest "${_cp_entry%/}/skills.conf" 2>/dev/null | grep -c .)
+                    _cp_sk_note=" [skills: ${_cp_sk_n}/${_cp_pool_n}]"
+                fi
                 _cp_is_default=0
                 _cp_is_active=0
                 if [ "$_cp_entry_name" = "$_cp_cur_default" ]; then
@@ -828,13 +1081,13 @@ SETTINGSEOF
                     _cp_is_active=1
                 fi
                 if [ "$_cp_is_default" -eq 1 ] && [ "$_cp_is_active" -eq 1 ]; then
-                    printf '>* %s (default, active)\n' "$_cp_entry_name"
+                    printf '>* %s (default, active)%s\n' "$_cp_entry_name" "$_cp_sk_note"
                 elif [ "$_cp_is_default" -eq 1 ]; then
-                    printf ' * %s (default)\n' "$_cp_entry_name"
+                    printf ' * %s (default)%s\n' "$_cp_entry_name" "$_cp_sk_note"
                 elif [ "$_cp_is_active" -eq 1 ]; then
-                    printf '>  %s (active)\n' "$_cp_entry_name"
+                    printf '>  %s (active)%s\n' "$_cp_entry_name" "$_cp_sk_note"
                 else
-                    printf '   %s\n' "$_cp_entry_name"
+                    printf '   %s%s\n' "$_cp_entry_name" "$_cp_sk_note"
                 fi
             done
             if [ "$_cp_found" -eq 0 ]; then
@@ -940,6 +1193,272 @@ SETTINGSEOF
             esac
             ;;
 
+        skills)
+            shift
+            _cp_sk_pool="${_cp_data}/skills"
+            _cp_pool_guard || return 1
+            case "${1:-}" in
+                register)
+                    shift
+                    _cp_sk_name="${1:-}"
+                    _cp_sk_path="${2:-}"
+                    if [ -z "$_cp_sk_name" ] || [ -z "$_cp_sk_path" ]; then
+                        _cp_die "usage: claude-profile skills register <name> <path>"
+                        return 1
+                    fi
+                    if [ -n "${3:-}" ]; then
+                        _cp_die "unexpected argument '$3'"
+                        return 1
+                    fi
+                    _cp_validate_skill_name "$_cp_sk_name" || return 1
+                    if [ ! -d "$_cp_sk_path" ]; then
+                        _cp_die "'${_cp_sk_path}' is not a directory"
+                        return 1
+                    fi
+                    if [ ! -f "${_cp_sk_path}/SKILL.md" ]; then
+                        _cp_die "'${_cp_sk_path}' does not contain a SKILL.md"
+                        return 1
+                    fi
+                    mkdir -p "$_cp_sk_pool" || { _cp_die "cannot create ${_cp_sk_pool}"; return 1; }
+                    if [ -e "${_cp_sk_pool}/${_cp_sk_name}" ] || [ -L "${_cp_sk_pool}/${_cp_sk_name}" ]; then
+                        _cp_die "skill '${_cp_sk_name}' is already registered"
+                        return 1
+                    fi
+                    _cp_sk_abs=$(CDPATH='' cd -- "$_cp_sk_path" 2>/dev/null && pwd) || _cp_sk_abs=""
+                    if [ -z "$_cp_sk_abs" ]; then
+                        _cp_die "could not resolve '${_cp_sk_path}' to an absolute path"
+                        return 1
+                    fi
+                    if ! _cp_make_link "$_cp_sk_abs" "${_cp_sk_pool}/${_cp_sk_name}"; then
+                        _cp_die "could not create pool link for '${_cp_sk_name}'"
+                        return 1
+                    fi
+                    printf 'Registered skill: %s -> %s\n' "$_cp_sk_name" "$_cp_sk_abs"
+                    printf "Run 'claude-profile skills sync --all' to link it into unfiltered profiles.\\n"
+                    ;;
+
+                unregister)
+                    shift
+                    _cp_sk_force=0
+                    _cp_sk_name=""
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            --force) _cp_sk_force=1 ;;
+                            -*)
+                                _cp_die "unknown option '$1'"
+                                return 1
+                                ;;
+                            *)
+                                if [ -n "$_cp_sk_name" ]; then
+                                    _cp_die "unexpected argument '$1'"
+                                    return 1
+                                fi
+                                _cp_sk_name="$1"
+                                ;;
+                        esac
+                        shift
+                    done
+                    if [ -z "$_cp_sk_name" ]; then
+                        _cp_die "usage: claude-profile skills unregister [--force] <name>"
+                        return 1
+                    fi
+                    _cp_validate_skill_name "$_cp_sk_name" || return 1
+                    _cp_sk_entry="${_cp_sk_pool}/${_cp_sk_name}"
+                    if [ -L "$_cp_sk_entry" ]; then
+                        _cp_remove_link "$_cp_sk_entry" || { _cp_die "could not remove ${_cp_sk_entry}"; return 1; }
+                    elif [ -d "$_cp_sk_entry" ]; then
+                        if [ "$_cp_sk_force" -eq 0 ]; then
+                            _cp_die "'${_cp_sk_name}' is a real directory in the pool; pass --force to delete it and its contents"
+                            return 1
+                        fi
+                        rm -rf "$_cp_sk_entry" || { _cp_die "could not remove ${_cp_sk_entry}"; return 1; }
+                    else
+                        _cp_die "skill '${_cp_sk_name}' is not registered"
+                        return 1
+                    fi
+                    for _cp_sk_p in "$_cp_data"/*/; do
+                        [ -d "$_cp_sk_p" ] || continue
+                        _cp_sk_pn="${_cp_sk_p%/}"
+                        _cp_sk_pn="${_cp_sk_pn##*/}"
+                        [ "$_cp_sk_pn" = "skills" ] && continue
+                        # Read via _cp_read_manifest so CRLF manifests
+                        # written by the cmd/PowerShell implementations
+                        # still match.
+                        if [ -f "${_cp_sk_p%/}/skills.conf" ] \
+                            && _cp_read_manifest "${_cp_sk_p%/}/skills.conf" 2>/dev/null | grep -Fqx "$_cp_sk_name"; then
+                            _cp_die "note: profile '${_cp_sk_pn}' still lists '${_cp_sk_name}' in skills.conf"
+                        fi
+                    done
+                    printf 'Unregistered skill: %s\n' "$_cp_sk_name"
+                    printf "Run 'claude-profile skills sync --all' to remove stale links from profiles.\\n"
+                    ;;
+
+                add|remove)
+                    _cp_sk_op="$1"
+                    shift
+                    _cp_sk_name="${1:-}"
+                    if [ -z "$_cp_sk_name" ]; then
+                        _cp_die "usage: claude-profile skills ${_cp_sk_op} <skill> [profile]"
+                        return 1
+                    fi
+                    if [ -n "${3:-}" ]; then
+                        _cp_die "unexpected argument '$3'"
+                        return 1
+                    fi
+                    _cp_validate_skill_name "$_cp_sk_name" || return 1
+                    _cp_skills_profile "${2:-}" || return 1
+                    _cp_sk_pdir="${_cp_data}/${_cp_sp_name}"
+                    if [ "$_cp_sk_op" = "add" ] && [ ! -d "${_cp_sk_pool}/${_cp_sk_name}" ]; then
+                        _cp_die "skill '${_cp_sk_name}' is not in the pool. Register it with: claude-profile skills register ${_cp_sk_name} <path>"
+                        return 1
+                    fi
+                    _cp_skills_materialize_manifest "$_cp_sk_pdir" || { _cp_die "could not write skills.conf"; return 1; }
+                    _cp_sk_file="${_cp_sk_pdir}/skills.conf"
+                    # Membership and removal go through CR/whitespace
+                    # trimming (not bare grep -x) so CRLF manifests written
+                    # by the cmd/PowerShell implementations still match.
+                    if [ "$_cp_sk_op" = "add" ]; then
+                        if ! _cp_read_manifest "$_cp_sk_file" 2>/dev/null | grep -Fqx "$_cp_sk_name"; then
+                            printf '%s\n' "$_cp_sk_name" >> "$_cp_sk_file" || return 1
+                        fi
+                        _cp_skills_sync_one "$_cp_sp_name" || return 1
+                        printf "Added skill '%s' to profile '%s'\n" "$_cp_sk_name" "$_cp_sp_name"
+                    else
+                        awk -v n="$_cp_sk_name" '{
+                            l = $0
+                            sub(/\r$/, "", l)
+                            gsub(/^[ \t]+/, "", l); gsub(/[ \t]+$/, "", l)
+                            if (l == n) next
+                            print
+                        }' "$_cp_sk_file" > "${_cp_sk_file}.tmp.$$" 2>/dev/null
+                        mv -f "${_cp_sk_file}.tmp.$$" "$_cp_sk_file" || { rm -f "${_cp_sk_file}.tmp.$$"; return 1; }
+                        _cp_skills_sync_one "$_cp_sp_name" || return 1
+                        printf "Removed skill '%s' from profile '%s'\n" "$_cp_sk_name" "$_cp_sp_name"
+                    fi
+                    ;;
+
+                set)
+                    shift
+                    _cp_sk_list="${1:-}"
+                    if [ -z "$_cp_sk_list" ]; then
+                        _cp_die "usage: claude-profile skills set <skill1,skill2,...> [profile]"
+                        return 1
+                    fi
+                    if [ -n "${3:-}" ]; then
+                        _cp_die "unexpected argument '$3'"
+                        return 1
+                    fi
+                    _cp_skills_profile "${2:-}" || return 1
+                    _cp_sk_file="${_cp_data}/${_cp_sp_name}/skills.conf"
+                    _cp_sk_tmp="${_cp_sk_file}.tmp.$$"
+                    : > "$_cp_sk_tmp" || { _cp_die "could not write skills.conf"; return 1; }
+                    _cp_sk_old_ifs="$IFS"
+                    IFS=','
+                    set -f
+                    # shellcheck disable=SC2086  # word splitting on commas is the point
+                    set -- $_cp_sk_list
+                    set +f
+                    IFS="$_cp_sk_old_ifs"
+                    for _cp_sk_name in "$@"; do
+                        [ -n "$_cp_sk_name" ] || continue
+                        _cp_validate_skill_name "$_cp_sk_name" || { rm -f "$_cp_sk_tmp"; return 1; }
+                        if [ ! -d "${_cp_sk_pool}/${_cp_sk_name}" ]; then
+                            _cp_die "warning: skill '${_cp_sk_name}' is not in the pool"
+                        fi
+                        printf '%s\n' "$_cp_sk_name" >> "$_cp_sk_tmp"
+                    done
+                    mv -f "$_cp_sk_tmp" "$_cp_sk_file" || { rm -f "$_cp_sk_tmp"; return 1; }
+                    _cp_skills_sync_one "$_cp_sp_name" || return 1
+                    printf "Set skills for profile '%s'\n" "$_cp_sp_name"
+                    ;;
+
+                reset)
+                    shift
+                    if [ -n "${2:-}" ]; then
+                        _cp_die "unexpected argument '$2'"
+                        return 1
+                    fi
+                    _cp_skills_profile "${1:-}" || return 1
+                    rm -f "${_cp_data}/${_cp_sp_name}/skills.conf"
+                    _cp_skills_sync_one "$_cp_sp_name" || return 1
+                    printf "Profile '%s' reset to all pool skills\n" "$_cp_sp_name"
+                    ;;
+
+                sync)
+                    shift
+                    if [ -n "${2:-}" ]; then
+                        _cp_die "unexpected argument '$2'"
+                        return 1
+                    fi
+                    if [ "${1:-}" = "--all" ]; then
+                        # The ls guard keeps zsh's nomatch from aborting on
+                        # an empty glob.
+                        [ -n "$(ls "$_cp_data" 2>/dev/null)" ] && for _cp_sk_p in "$_cp_data"/*/; do
+                            [ -d "$_cp_sk_p" ] || continue
+                            _cp_sk_pn="${_cp_sk_p%/}"
+                            _cp_sk_pn="${_cp_sk_pn##*/}"
+                            [ "$_cp_sk_pn" = "skills" ] && continue
+                            _cp_skills_sync_one "$_cp_sk_pn"
+                            printf "Synced profile '%s'\n" "$_cp_sk_pn"
+                        done
+                    else
+                        _cp_skills_profile "${1:-}" || return 1
+                        _cp_skills_sync_one "$_cp_sp_name" || return 1
+                        printf "Synced profile '%s'\n" "$_cp_sp_name"
+                    fi
+                    ;;
+
+                "")
+                    if [ ! -d "$_cp_sk_pool" ]; then
+                        printf 'No skill pool yet. Register a skill with: claude-profile skills register <name> <path>\n'
+                        return 0
+                    fi
+                    _cp_skills_profile "" || return 1
+                    _cp_sk_pdir="${_cp_data}/${_cp_sp_name}"
+                    if [ -f "${_cp_sk_pdir}/skills.conf" ]; then
+                        printf "Profile '%s': skills.conf present (filtered)\n" "$_cp_sp_name"
+                    else
+                        printf "Profile '%s': no skills.conf (all pool skills)\n" "$_cp_sp_name"
+                    fi
+                    printf 'Skill pool: %s\n' "$_cp_sk_pool"
+                    _cp_sk_desired=$(_cp_desired_skills "$_cp_sk_pdir" "$_cp_sk_pool")
+                    _cp_sk_found=0
+                    # The ls guard keeps zsh's nomatch from aborting on an
+                    # empty glob.
+                    [ -n "$(ls "$_cp_sk_pool" 2>/dev/null)" ] && for _cp_sk_e in "$_cp_sk_pool"/*; do
+                        [ -d "$_cp_sk_e" ] || [ -L "$_cp_sk_e" ] || continue
+                        _cp_sk_found=1
+                        _cp_sk_n="${_cp_sk_e##*/}"
+                        _cp_sk_dst="${_cp_sk_pdir}/skills/${_cp_sk_n}"
+                        _cp_sk_status="not linked"
+                        if [ ! -d "$_cp_sk_e" ]; then
+                            _cp_sk_status="dangling (target missing)"
+                        elif [ -L "$_cp_sk_dst" ]; then
+                            _cp_sk_t=$(_cp_link_target "$_cp_sk_dst") || _cp_sk_t=""
+                            if _cp_target_in_pool "$_cp_sk_t" "$_cp_sk_pool"; then
+                                _cp_sk_status="linked"
+                            else
+                                _cp_sk_status="conflict (unmanaged entry)"
+                            fi
+                        elif [ -e "$_cp_sk_dst" ]; then
+                            _cp_sk_status="conflict (unmanaged entry)"
+                        elif printf '%s\n' "$_cp_sk_desired" | grep -Fqx "$_cp_sk_n"; then
+                            _cp_sk_status="selected, not linked (run sync)"
+                        fi
+                        printf '  %-24s %s\n' "$_cp_sk_n" "$_cp_sk_status"
+                    done
+                    if [ "$_cp_sk_found" -eq 0 ]; then
+                        printf '  (pool is empty)\n'
+                    fi
+                    ;;
+
+                *)
+                    _cp_die "unknown skills command '$1'. Run 'claude-profile help' for usage."
+                    return 1
+                    ;;
+            esac
+            ;;
+
         version)
             _cp_installed_version
             ;;
@@ -963,6 +1482,20 @@ Commands:
                             directory-local profile for the current directory
     auto [on|off|status]    Control directory-local auto-switching
     which [name]            Show the resolved config directory path
+    skills                  List pool skills and their status for the profile
+    skills register <name> <path>
+                            Add a skill directory to the shared pool
+    skills unregister [--force] <name>
+                            Remove a skill from the pool
+    skills add <skill> [profile]
+                            Add a pool skill to a profile
+    skills remove <skill> [profile]
+                            Remove a pool skill from a profile
+    skills set <s1,s2,...> [profile]
+                            Replace a profile's skill selection
+    skills reset [profile]  Back to the default (all pool skills)
+    skills sync [profile|--all]
+                            Re-materialize skill links
     version                 Show the installed version
     update [--force]        Update to the latest release
     delete <name>           Delete a profile
@@ -978,9 +1511,16 @@ explicit 'claude-profile use' pins the session and wins over any
 CLAUDE_PROFILE_NO_AUTO_SWITCH=1 to disable, CLAUDE_PROFILE_AUTO_QUIET=1
 to switch silently.
 
+Skills: a shared pool at <data-dir>/skills holds registered skills. A
+profile's skills.conf (one name per line, # comments) selects the subset
+linked into <profile>/skills; without one the profile gets every pool
+skill. Hand-made entries in <profile>/skills are never touched.
+
 Examples:
     claude-profile create work
     claude-profile create --init work
+    claude-profile skills register humanize ~/skills/humanize
+    claude-profile skills set humanize,optimize work
     claude-profile default work
     claude-profile use work
     claude                          # runs with "work" profile
@@ -1020,6 +1560,21 @@ HELPEOF
                 printf 'Default profile: %s\n' "$_cp_cur_default"
             else
                 printf 'No default profile set\n'
+            fi
+            # Skills annotation for the active (else default) profile;
+            # silent until a skill pool exists.
+            if [ -d "${_cp_data}/skills" ]; then
+                _cp_sk_prof="$_cp_active"
+                [ -n "$_cp_sk_prof" ] || _cp_sk_prof="$_cp_cur_default"
+                if [ -n "$_cp_sk_prof" ] && [ -d "${_cp_data}/${_cp_sk_prof}" ]; then
+                    _cp_sk_pool_n=$(_cp_pool_skills "${_cp_data}/skills" | grep -c .)
+                    if [ -f "${_cp_data}/${_cp_sk_prof}/skills.conf" ]; then
+                        _cp_sk_n=$(_cp_read_manifest "${_cp_data}/${_cp_sk_prof}/skills.conf" 2>/dev/null | grep -c .)
+                        printf 'Skills: %s of %s pool skills (filtered)\n' "$_cp_sk_n" "$_cp_sk_pool_n"
+                    else
+                        printf 'Skills: all pool skills (%s)\n' "$_cp_sk_pool_n"
+                    fi
+                fi
             fi
             ;;
 

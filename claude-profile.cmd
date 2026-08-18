@@ -37,6 +37,7 @@ if "%~1"=="-h"      goto :usage
 if "%~1"=="--help"  goto :usage
 if "%~1"=="version" goto :dispatch_version
 if "%~1"=="update"  goto :dispatch_update
+if "%~1"=="skills"  goto :dispatch_skills
 
 :: Flags without a subcommand are not supported
 set "_first=%~1"
@@ -86,6 +87,10 @@ goto :cmd_version
 :dispatch_update
 shift
 goto :cmd_update
+
+:dispatch_skills
+shift
+goto :cmd_skills
 
 :get_epoch
 :: cmd has no native epoch-time support; PowerShell ships with every
@@ -285,6 +290,14 @@ echo     local [name]            Show, set (.claude-profile), or --remove the
 echo                             directory-local profile for this directory
 echo     delete ^<name^>           Delete a profile
 echo     which [name]            Show the resolved config directory path
+echo     skills                  List pool skills and their status for the profile
+echo     skills register ^<name^> ^<path^>   Add a skill directory to the shared pool
+echo     skills unregister [--force] ^<name^>   Remove a skill from the pool
+echo     skills add ^<skill^> [profile]     Add a pool skill to a profile
+echo     skills remove ^<skill^> [profile]  Remove a pool skill from a profile
+echo     skills set ^<s1,s2,...^> [profile] Replace a profile's skill selection
+echo     skills reset [profile]           Back to the default (all pool skills^)
+echo     skills sync [profile^|--all]      Re-materialize skill links
 echo     version                 Show the installed version
 echo     update [--force]        Update to the latest release
 echo     help, -h, --help        Show this help message
@@ -296,6 +309,11 @@ echo A directory containing a .claude-profile file (holding a profile name)
 echo is preferred over the default profile by a bare 'call claude-profile'.
 echo cmd.exe has no cd hook, so this resolves at invocation time rather than
 echo automatically on cd as it does in the sh and PowerShell versions.
+echo.
+echo Skills: a shared pool at %%LOCALAPPDATA%%\claude-profiles\skills holds
+echo registered skills. A profile's skills.conf (one name per line, # comments^)
+echo selects the subset linked into ^<profile^>\skills; without one the profile
+echo gets every pool skill. Hand-made entries are never touched.
 echo.
 echo Examples:
 echo     claude-profile create work
@@ -341,7 +359,212 @@ echo !_vn_name!| findstr /R "^[a-zA-Z0-9_-][a-zA-Z0-9_-]*$" >nul 2>&1 || (
     exit /b 1
 )
 
+:: 'skills' is the skill pool directory inside the data dir
+if /i "!_vn_name!"=="skills" (
+    echo claude-profile: profile name 'skills' is reserved for the skill pool >&2
+    exit /b 1
+)
+
 goto :eof
+
+:: --- Skill pool helpers ---
+::
+:: A central pool at %DATA_DIR%\skills holds registered skills (directories
+:: or junctions to skill source directories). Each profile may carry a
+:: skills.conf manifest (one pool-skill name per line, # comments) naming
+:: the subset it wants; no manifest means every pool skill. Sync
+:: materializes the selection as junctions in <profile>\skills. Only
+:: junctions pointing at the pool are ever created or removed -- hand-made
+:: links, real directories, and files are left alone.
+
+:: validate_skill_name -- expects the name in %_vs_name%, errorlevel 1 on failure
+:validate_skill_name
+if "%_vs_name%"=="" (
+    echo claude-profile: skill name must not be empty >&2
+    exit /b 1
+)
+echo !_vs_name!| findstr /R "^[a-zA-Z0-9_-][a-zA-Z0-9_-]*$" >nul 2>&1 || (
+    echo claude-profile: invalid skill name '%_vs_name%': use only letters, digits, hyphens, underscores >&2
+    exit /b 1
+)
+goto :eof
+
+:: get_link_target <parent-dir> <entry-name> -> sets _lt_target to the link
+:: target shown by `dir /AL` (empty when the entry is not a link). Names are
+:: validated (no spaces or brackets), so " name [" is an exact-entry match.
+:get_link_target
+set "_lt_target="
+for /f "usebackq tokens=*" %%L in (`dir /AL "%~1" 2^>nul ^| findstr /C:" %~2 [" 2^>nul`) do (
+    set "_lt_line=%%L"
+    set "_lt_target=!_lt_line:*[=!"
+    if "!_lt_target:~-1!"=="]" set "_lt_target=!_lt_target:~0,-1!"
+)
+goto :eof
+
+:: read_manifest <path> -> sets _mf_list to a space-delimited list of the
+:: valid skill names (with leading/trailing spaces for membership tests).
+:: Blank lines and # comments are skipped; invalid names warn and are
+:: skipped so one bad line never fails a whole sync.
+:read_manifest
+call :capture_cr
+set "_mf_list= "
+if not exist "%~1" goto :eof
+for /f "usebackq eol=# tokens=* delims=	 " %%L in ("%~1") do (
+    set "_mf_line=%%L"
+    call :trim_manifest_line
+    if defined _mf_line (
+        echo !_mf_line!| findstr /R "^[a-zA-Z0-9_-][a-zA-Z0-9_-]*$" >nul 2>&1
+        if not errorlevel 1 (
+            set "_mf_list=!_mf_list!!_mf_line! "
+        ) else (
+            echo claude-profile: skills.conf: ignoring invalid skill name '!_mf_line!' >&2
+        )
+    )
+)
+goto :eof
+
+:: count_manifest -> sets _mf_count to the number of names in _mf_list.
+:count_manifest
+set "_mf_count=0"
+for %%n in (!_mf_list!) do set /a _mf_count+=1
+goto :eof
+
+:trim_manifest_line
+if not defined _mf_line goto :eof
+if "!_mf_line:~-1!"==" "       (set "_mf_line=!_mf_line:~0,-1!" & goto :trim_manifest_line)
+if "!_mf_line:~-1!"=="	"      (set "_mf_line=!_mf_line:~0,-1!" & goto :trim_manifest_line)
+if "!_mf_line:~-1!"=="!_CP_CR!" (set "_mf_line=!_mf_line:~0,-1!" & goto :trim_manifest_line)
+goto :eof
+
+:: pool_skills -> sets _pl_list to a space-delimited list of every skill
+:: registered in the pool (junctions enumerate like directories, dangling
+:: ones included) and _pl_count to how many there are.
+:pool_skills
+set "_pl_list= "
+set "_pl_count=0"
+if not exist "%DATA_DIR%\skills\" goto :eof
+for /d %%d in ("%DATA_DIR%\skills\*") do (
+    set "_pl_list=!_pl_list!%%~nxd "
+    set /a _pl_count+=1
+)
+goto :eof
+
+:: desired_skills <profile-dir> -> sets _ds_list to the space-delimited
+:: desired skill set: the manifest names when skills.conf exists, every
+:: pool skill otherwise.
+:desired_skills
+if exist "%~1\skills.conf" (
+    call :read_manifest "%~1\skills.conf"
+    set "_ds_list=!_mf_list!"
+) else (
+    call :pool_skills
+    set "_ds_list=!_pl_list!"
+)
+goto :eof
+
+:: skills_profile <name-or-empty> -> sets _sp_name to the profile a skills
+:: command acts on: the explicit argument if given, else the active profile
+:: (CLAUDE_CONFIG_DIR under DATA_DIR), else the default. errorlevel 1 on failure.
+:skills_profile
+set "_sp_name="
+if not "%~1"=="" (
+    set "_vn_name=%~1"
+    call :validate_name
+    if errorlevel 1 exit /b 1
+    set "_sp_name=%~1"
+    goto :skills_profile_check
+)
+if defined CLAUDE_CONFIG_DIR (
+    for %%p in ("!CLAUDE_CONFIG_DIR!") do set "_sp_cand=%%~nxp"
+    if /i "!CLAUDE_CONFIG_DIR!"=="%DATA_DIR%\!_sp_cand!" (
+        set "_sp_name=!_sp_cand!"
+        goto :skills_profile_check
+    )
+    echo claude-profile: active CLAUDE_CONFIG_DIR is not a managed profile; pass a profile name >&2
+    exit /b 1
+)
+if not exist "%DEFAULT_FILE%" (
+    echo claude-profile: no profile specified and no default profile set >&2
+    exit /b 1
+)
+set /p _sp_name=<"%DEFAULT_FILE%"
+if "!_sp_name!"=="" (
+    echo claude-profile: no profile specified and no default profile set >&2
+    exit /b 1
+)
+:skills_profile_check
+if not exist "%DATA_DIR%\!_sp_name!\" (
+    echo claude-profile: profile '!_sp_name!' does not exist >&2
+    exit /b 1
+)
+exit /b 0
+
+:: pool_guard -> errorlevel 1 when %DATA_DIR%\skills exists but looks like
+:: a Claude Code profile (a profile named 'skills' created before that
+:: name was reserved). Without this, pool operations would enumerate its
+:: internals as skills and link them into every profile.
+:pool_guard
+if not exist "%DATA_DIR%\skills\" exit /b 0
+if exist "%DATA_DIR%\skills\settings.json" goto :pool_guard_fail
+if exist "%DATA_DIR%\skills\.credentials.json" goto :pool_guard_fail
+exit /b 0
+:pool_guard_fail
+echo claude-profile: %DATA_DIR%\skills looks like a Claude Code profile, not a skill pool ^(the name 'skills' is now reserved^). Move that profile aside before using skill pools. >&2
+exit /b 1
+
+:: sync_profile <name> -> re-materializes managed skill junctions for the
+:: profile from its manifest (or the whole pool when no manifest).
+:sync_profile
+call :pool_guard
+if errorlevel 1 exit /b 1
+set "_sy_pool=%DATA_DIR%\skills"
+set "_sy_pdir=%DATA_DIR%\%~1"
+set "_sy_sdir=!_sy_pdir!\skills"
+:: A manifest that exists but can't be read must abort, not silently
+:: become "select nothing" and strip the profile's managed links.
+if exist "!_sy_pdir!\skills.conf" (
+    type "!_sy_pdir!\skills.conf" >nul 2>&1
+    if errorlevel 1 (
+        echo claude-profile: cannot read !_sy_pdir!\skills.conf; not syncing >&2
+        exit /b 1
+    )
+)
+call :desired_skills "!_sy_pdir!"
+if not exist "!_sy_sdir!\" mkdir "!_sy_sdir!" >nul 2>&1
+if not exist "!_sy_sdir!\" (
+    echo claude-profile: cannot create !_sy_sdir! >&2
+    exit /b 1
+)
+
+:: Pass 1: drop managed junctions that are dangling or no longer desired.
+for /f "usebackq delims=" %%e in (`dir /AL /B "!_sy_sdir!" 2^>nul`) do (
+    call :get_link_target "!_sy_sdir!" "%%e"
+    if /i "!_lt_target!"=="!_sy_pool!\%%e" (
+        set "_sy_keep=1"
+        if "!_ds_list: %%e =!"=="!_ds_list!" set "_sy_keep=0"
+        if not exist "!_sy_pool!\%%e\" set "_sy_keep=0"
+        if "!_sy_keep!"=="0" (
+            rmdir "!_sy_sdir!\%%e" >nul 2>&1
+            if exist "!_sy_sdir!\%%e" echo claude-profile: could not remove !_sy_sdir!\%%e >&2
+        )
+    )
+)
+
+:: Pass 2: create junctions missing from the desired set.
+for %%n in (!_ds_list!) do (
+    if not exist "!_sy_pool!\%%n\" (
+        echo claude-profile: skill '%%n' is not in the pool ^(or its source is gone^); skipping >&2
+    ) else if exist "!_sy_sdir!\%%n" (
+        call :get_link_target "!_sy_sdir!" "%%n"
+        if /i not "!_lt_target!"=="!_sy_pool!\%%n" (
+            echo claude-profile: skill '%%n': unmanaged entry already at !_sy_sdir!\%%n; skipping >&2
+        )
+    ) else (
+        mklink /J "!_sy_sdir!\%%n" "!_sy_pool!\%%n" >nul 2>&1
+        if not exist "!_sy_sdir!\%%n" echo claude-profile: could not link skill '%%n' >&2
+    )
+)
+exit /b 0
 
 :: --- Directory-local profile (.claude-profile) ---
 ::
@@ -496,6 +719,10 @@ if exist "%_cc_dir%\" (
 mkdir "%_cc_dir%"
 echo Created profile: %~1
 echo Config directory: %_cc_dir%
+:: A new profile has no manifest, so this links every pool skill (the
+:: backward-compatible "all" default). No pool: no-op.
+set "_sk_pool=%DATA_DIR%\skills"
+if exist "%DATA_DIR%\skills\" call :sync_profile "%~1"
 exit /b 0
 
 :cmd_list
@@ -509,14 +736,23 @@ if exist "%DEFAULT_FILE%" (
     set /p _cl_default=<"%DEFAULT_FILE%"
 )
 
+call :pool_skills
 set "_cl_found=0"
 for /d %%d in ("%DATA_DIR%\*") do (
-    set "_cl_found=1"
-    set "_cl_name=%%~nxd"
-    if "!_cl_name!"=="!_cl_default!" (
-        echo * !_cl_name! (default^)
-    ) else (
-        echo   !_cl_name!
+    if /i not "%%~nxd"=="skills" (
+        set "_cl_found=1"
+        set "_cl_name=%%~nxd"
+        set "_cl_note="
+        if exist "%%d\skills.conf" (
+            call :read_manifest "%%d\skills.conf"
+            call :count_manifest
+            set "_cl_note= [skills: !_mf_count!/!_pl_count!]"
+        )
+        if "!_cl_name!"=="!_cl_default!" (
+            echo * !_cl_name! (default^)!_cl_note!
+        ) else (
+            echo   !_cl_name!!_cl_note!
+        )
     )
 )
 
@@ -786,6 +1022,297 @@ if exist "%DEFAULT_FILE%" (
         echo Cleared default profile (was "!_cdel_name!"^)
     )
 )
+exit /b 0
+
+:cmd_skills
+set "_sk_pool=%DATA_DIR%\skills"
+call :pool_guard
+if errorlevel 1 exit /b 1
+if "%~1"=="" goto :cmd_skills_list
+if /i "%~1"=="register"   goto :cmd_skills_register
+if /i "%~1"=="unregister" goto :cmd_skills_unregister
+if /i "%~1"=="add"        goto :cmd_skills_addremove
+if /i "%~1"=="remove"     goto :cmd_skills_addremove
+if /i "%~1"=="set"        goto :cmd_skills_set
+if /i "%~1"=="reset"      goto :cmd_skills_reset
+if /i "%~1"=="sync"       goto :cmd_skills_sync
+echo claude-profile: unknown skills command '%~1'. Run 'claude-profile help' for usage. >&2
+exit /b 1
+
+:cmd_skills_register
+if "%~2"=="" (
+    echo claude-profile: usage: claude-profile skills register ^<name^> ^<path^> >&2
+    exit /b 1
+)
+if "%~3"=="" (
+    echo claude-profile: usage: claude-profile skills register ^<name^> ^<path^> >&2
+    exit /b 1
+)
+if not "%~4"=="" (
+    echo claude-profile: unexpected argument '%~4' >&2
+    exit /b 1
+)
+set "_vs_name=%~2"
+call :validate_skill_name
+if errorlevel 1 exit /b 1
+if not exist "%~3\" (
+    echo claude-profile: '%~3' is not a directory >&2
+    exit /b 1
+)
+if not exist "%~3\SKILL.md" (
+    echo claude-profile: '%~3' does not contain a SKILL.md >&2
+    exit /b 1
+)
+if not exist "!_sk_pool!\" mkdir "!_sk_pool!" >nul 2>&1
+if not exist "!_sk_pool!\" (
+    echo claude-profile: cannot create !_sk_pool! >&2
+    exit /b 1
+)
+if exist "!_sk_pool!\%~2" (
+    echo claude-profile: skill '%~2' is already registered >&2
+    exit /b 1
+)
+set "_sk_abs=%~f3"
+mklink /J "!_sk_pool!\%~2" "!_sk_abs!" >nul 2>&1
+if not exist "!_sk_pool!\%~2\" (
+    echo claude-profile: could not create pool link for '%~2' >&2
+    exit /b 1
+)
+echo Registered skill: %~2 -^> !_sk_abs!
+echo Run 'claude-profile skills sync --all' to link it into unfiltered profiles.
+exit /b 0
+
+:cmd_skills_unregister
+if not "%~4"=="" (
+    echo claude-profile: unexpected argument '%~4' >&2
+    exit /b 1
+)
+set "_sk_force=0"
+set "_sk_name="
+if /i "%~2"=="--force" (
+    set "_sk_force=1"
+) else if not "%~2"=="" (
+    set "_sk_name=%~2"
+)
+if /i "%~3"=="--force" (
+    set "_sk_force=1"
+) else if not "%~3"=="" (
+    if defined _sk_name (
+        echo claude-profile: unexpected argument '%~3' >&2
+        exit /b 1
+    )
+    set "_sk_name=%~3"
+)
+if not defined _sk_name (
+    echo claude-profile: usage: claude-profile skills unregister [--force] ^<name^> >&2
+    exit /b 1
+)
+set "_vs_name=!_sk_name!"
+call :validate_skill_name
+if errorlevel 1 exit /b 1
+set "_sk_entry=!_sk_pool!\!_sk_name!"
+:: Detect link-ness FIRST (never probe by deleting). `if exist` resolves
+:: links, so a dangling junction reads as absent — the dir /AL scan still
+:: sees the entry itself and lets it be unregistered.
+set "_sk_islink=0"
+for /f "usebackq delims=" %%e in (`dir /AL /B "!_sk_pool!" 2^>nul ^| findstr /X /C:"!_sk_name!" 2^>nul`) do set "_sk_islink=1"
+if "!_sk_islink!"=="1" (
+    rmdir "!_sk_entry!" >nul 2>&1
+    if exist "!_sk_entry!\" (
+        echo claude-profile: could not remove !_sk_entry! >&2
+        exit /b 1
+    )
+) else if exist "!_sk_entry!\" (
+    if "!_sk_force!"=="0" (
+        echo claude-profile: '!_sk_name!' is a real directory in the pool; pass --force to delete it and its contents >&2
+        exit /b 1
+    )
+    rmdir /s /q "!_sk_entry!" >nul 2>&1
+    if exist "!_sk_entry!\" (
+        echo claude-profile: could not remove !_sk_entry! >&2
+        exit /b 1
+    )
+) else (
+    echo claude-profile: skill '!_sk_name!' is not registered >&2
+    exit /b 1
+)
+for /d %%d in ("%DATA_DIR%\*") do (
+    if /i not "%%~nxd"=="skills" if exist "%%d\skills.conf" (
+        call :read_manifest "%%d\skills.conf"
+        call :warn_manifest_reference "%%~nxd"
+    )
+)
+echo Unregistered skill: !_sk_name!
+echo Run 'claude-profile skills sync --all' to remove stale links from profiles.
+exit /b 0
+
+:: warn_manifest_reference <profile-name> -- warns when the manifest just
+:: read into _mf_list still lists !_sk_name!. Split out of the loop above
+:: because nested delayed expansions of _sk_name inside a for block don't
+:: compose with the substring-membership test.
+:warn_manifest_reference
+if "!_mf_list: %_sk_name% =!"=="!_mf_list!" goto :eof
+echo claude-profile: note: profile '%~1' still lists '!_sk_name!' in skills.conf >&2
+goto :eof
+
+:cmd_skills_addremove
+set "_sk_op=%~1"
+if "%~2"=="" (
+    echo claude-profile: usage: claude-profile skills %_sk_op% ^<skill^> [profile] >&2
+    exit /b 1
+)
+if not "%~4"=="" (
+    echo claude-profile: unexpected argument '%~4' >&2
+    exit /b 1
+)
+set "_vs_name=%~2"
+call :validate_skill_name
+if errorlevel 1 exit /b 1
+call :skills_profile "%~3"
+if errorlevel 1 exit /b 1
+set "_sk_pdir=%DATA_DIR%\!_sp_name!"
+set "_sk_manifest=!_sk_pdir!\skills.conf"
+if /i "!_sk_op!"=="add" if not exist "!_sk_pool!\%~2\" (
+    echo claude-profile: skill '%~2' is not in the pool. Register it with: claude-profile skills register %~2 ^<path^> >&2
+    exit /b 1
+)
+:: Materialize the implicit "all pool skills" default first so add/remove
+:: edits stay sticky.
+if not exist "!_sk_manifest!" (
+    call :pool_skills
+    >"!_sk_manifest!" type nul
+    for %%n in (!_pl_list!) do >>"!_sk_manifest!" echo %%n
+)
+if /i "!_sk_op!"=="add" (
+    findstr /X /C:"%~2" "!_sk_manifest!" >nul 2>&1
+    if errorlevel 1 >>"!_sk_manifest!" echo %~2
+) else (
+    set "_sk_tmp=!_sk_manifest!.tmp.%RANDOM%"
+    findstr /V /X /C:"%~2" "!_sk_manifest!" >"!_sk_tmp!" 2>nul
+    move /y "!_sk_tmp!" "!_sk_manifest!" >nul 2>&1
+)
+call :sync_profile "!_sp_name!"
+if errorlevel 1 exit /b 1
+if /i "!_sk_op!"=="add" (
+    echo Added skill '%~2' to profile '!_sp_name!'
+) else (
+    echo Removed skill '%~2' from profile '!_sp_name!'
+)
+exit /b 0
+
+:cmd_skills_set
+if "%~2"=="" (
+    echo claude-profile: usage: claude-profile skills set ^<skill1,skill2,...^> [profile] >&2
+    exit /b 1
+)
+if not "%~4"=="" (
+    echo claude-profile: unexpected argument '%~4' >&2
+    exit /b 1
+)
+call :skills_profile "%~3"
+if errorlevel 1 exit /b 1
+set "_sk_listarg=%~2"
+:: Reject anything but names and commas up front: a bare `for %%n in (...)`
+:: would otherwise glob-expand wildcards against the current directory.
+echo !_sk_listarg!| findstr /R "^[a-zA-Z0-9_,-][a-zA-Z0-9_,-]*$" >nul 2>&1 || (
+    echo claude-profile: invalid skill list '%~2': use comma-separated names ^(letters, digits, hyphens, underscores^) >&2
+    exit /b 1
+)
+set "_sk_manifest=%DATA_DIR%\!_sp_name!\skills.conf"
+set "_sk_tmp=!_sk_manifest!.tmp.%RANDOM%"
+set "_sk_bad=0"
+>"!_sk_tmp!" type nul
+:: cmd's for treats commas as delimiters, so the comma list splits natively.
+for %%n in (!_sk_listarg!) do (
+    set "_vs_name=%%n"
+    call :validate_skill_name
+    if errorlevel 1 (
+        set "_sk_bad=1"
+    ) else (
+        if not exist "!_sk_pool!\%%n\" (
+            echo claude-profile: warning: skill '%%n' is not in the pool >&2
+        )
+        >>"!_sk_tmp!" echo %%n
+    )
+)
+if "!_sk_bad!"=="1" (
+    del /f /q "!_sk_tmp!" >nul 2>&1
+    exit /b 1
+)
+move /y "!_sk_tmp!" "!_sk_manifest!" >nul 2>&1
+call :sync_profile "!_sp_name!"
+if errorlevel 1 exit /b 1
+echo Set skills for profile '!_sp_name!'
+exit /b 0
+
+:cmd_skills_reset
+if not "%~3"=="" (
+    echo claude-profile: unexpected argument '%~3' >&2
+    exit /b 1
+)
+call :skills_profile "%~2"
+if errorlevel 1 exit /b 1
+del /f /q "%DATA_DIR%\!_sp_name!\skills.conf" >nul 2>&1
+call :sync_profile "!_sp_name!"
+if errorlevel 1 exit /b 1
+echo Profile '!_sp_name!' reset to all pool skills
+exit /b 0
+
+:cmd_skills_sync
+if not "%~3"=="" (
+    echo claude-profile: unexpected argument '%~3' >&2
+    exit /b 1
+)
+if /i "%~2"=="--all" (
+    for /d %%d in ("%DATA_DIR%\*") do (
+        if /i not "%%~nxd"=="skills" (
+            call :sync_profile "%%~nxd"
+            echo Synced profile '%%~nxd'
+        )
+    )
+    exit /b 0
+)
+call :skills_profile "%~2"
+if errorlevel 1 exit /b 1
+call :sync_profile "!_sp_name!"
+if errorlevel 1 exit /b 1
+echo Synced profile '!_sp_name!'
+exit /b 0
+
+:cmd_skills_list
+if not exist "!_sk_pool!\" (
+    echo No skill pool yet. Register a skill with: claude-profile skills register ^<name^> ^<path^>
+    exit /b 0
+)
+call :skills_profile ""
+if errorlevel 1 exit /b 1
+set "_sk_pdir=%DATA_DIR%\!_sp_name!"
+if exist "!_sk_pdir!\skills.conf" (
+    echo Profile '!_sp_name!': skills.conf present ^(filtered^)
+) else (
+    echo Profile '!_sp_name!': no skills.conf ^(all pool skills^)
+)
+echo Skill pool: !_sk_pool!
+call :desired_skills "!_sk_pdir!"
+set "_sk_found=0"
+for /d %%d in ("!_sk_pool!\*") do (
+    set "_sk_found=1"
+    set "_sk_status=not linked"
+    if not exist "!_sk_pool!\%%~nxd\" (
+        set "_sk_status=dangling (target missing)"
+    ) else if exist "!_sk_pdir!\skills\%%~nxd" (
+        call :get_link_target "!_sk_pdir!\skills" "%%~nxd"
+        if /i "!_lt_target!"=="!_sk_pool!\%%~nxd" (
+            set "_sk_status=linked"
+        ) else (
+            set "_sk_status=conflict (unmanaged entry)"
+        )
+    ) else (
+        if not "!_ds_list: %%~nxd =!"=="!_ds_list!" set "_sk_status=selected, not linked (run sync)"
+    )
+    echo   %%~nxd	!_sk_status!
+)
+if "!_sk_found!"=="0" echo   (pool is empty)
 exit /b 0
 
 :cmd_launch_default
