@@ -178,6 +178,8 @@ _cp_read_manifest() {
 # can report them and sync can warn.
 _cp_pool_skills() {
     [ -d "$1" ] || return 0
+    # The ls guard keeps zsh's nomatch from aborting on an empty glob.
+    [ -n "$(ls "$1" 2>/dev/null)" ] || return 0
     for _cp_ps_e in "$1"/*; do
         [ -d "$_cp_ps_e" ] || [ -L "$_cp_ps_e" ] || continue
         printf '%s\n' "${_cp_ps_e##*/}"
@@ -214,7 +216,8 @@ _cp_skills_sync_one() {
     mkdir -p "$_cp_ss_sdir" 2>/dev/null || { _cp_die "cannot create ${_cp_ss_sdir}"; return 1; }
 
     # Pass 1: drop managed links that are dangling or no longer desired.
-    for _cp_ss_e in "$_cp_ss_sdir"/*; do
+    # The ls guard keeps zsh's nomatch from aborting on an empty glob.
+    [ -n "$(ls "$_cp_ss_sdir" 2>/dev/null)" ] && for _cp_ss_e in "$_cp_ss_sdir"/*; do
         [ -e "$_cp_ss_e" ] || [ -L "$_cp_ss_e" ] || continue
         [ -L "$_cp_ss_e" ] || continue
         _cp_ss_t=$(_cp_link_target "$_cp_ss_e") || continue
@@ -1356,7 +1359,9 @@ SETTINGSEOF
                         return 1
                     fi
                     if [ "${1:-}" = "--all" ]; then
-                        for _cp_sk_p in "$_cp_data"/*/; do
+                        # The ls guard keeps zsh's nomatch from aborting on
+                        # an empty glob.
+                        [ -n "$(ls "$_cp_data" 2>/dev/null)" ] && for _cp_sk_p in "$_cp_data"/*/; do
                             [ -d "$_cp_sk_p" ] || continue
                             _cp_sk_pn="${_cp_sk_p%/}"
                             _cp_sk_pn="${_cp_sk_pn##*/}"
@@ -1386,7 +1391,9 @@ SETTINGSEOF
                     printf 'Skill pool: %s\n' "$_cp_sk_pool"
                     _cp_sk_desired=$(_cp_desired_skills "$_cp_sk_pdir" "$_cp_sk_pool")
                     _cp_sk_found=0
-                    for _cp_sk_e in "$_cp_sk_pool"/*; do
+                    # The ls guard keeps zsh's nomatch from aborting on an
+                    # empty glob.
+                    [ -n "$(ls "$_cp_sk_pool" 2>/dev/null)" ] && for _cp_sk_e in "$_cp_sk_pool"/*; do
                         [ -d "$_cp_sk_e" ] || [ -L "$_cp_sk_e" ] || continue
                         _cp_sk_found=1
                         _cp_sk_n="${_cp_sk_e##*/}"
