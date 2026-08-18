@@ -38,34 +38,42 @@ _cp_data_dir() {
     printf '%s\n' "${XDG_DATA_HOME:-${HOME}/.local/share}/claude-profiles"
 }
 
-_cp_validate_name() {
+# Shared name validation for profiles and skills; $2 is the noun used in
+# error messages so both validators stay rule-identical by construction.
+_cp_validate_name_core() {
     case "$1" in
         "")
-            _cp_die "profile name must not be empty"
+            _cp_die "$2 name must not be empty"
             return 1
             ;;
         .*)
-            _cp_die "invalid profile name '$1': must not start with '.'"
+            _cp_die "invalid $2 name '$1': must not start with '.'"
             return 1
             ;;
         *..*)
-            _cp_die "invalid profile name '$1': must not contain '..'"
+            _cp_die "invalid $2 name '$1': must not contain '..'"
             return 1
             ;;
         */*)
-            _cp_die "invalid profile name '$1': must not contain '/'"
+            _cp_die "invalid $2 name '$1': must not contain '/'"
             return 1
             ;;
         *\\*)
-            _cp_die "invalid profile name '$1': must not contain '\\'"
+            _cp_die "invalid $2 name '$1': must not contain '\\'"
             return 1
             ;;
     esac
     case "$1" in
         *[!A-Za-z0-9_-]*)
-            _cp_die "invalid profile name '$1': use only letters, digits, hyphens, underscores"
+            _cp_die "invalid $2 name '$1': use only letters, digits, hyphens, underscores"
             return 1
             ;;
+    esac
+}
+
+_cp_validate_name() {
+    _cp_validate_name_core "$1" profile || return 1
+    case "$1" in
         [Ss][Kk][Ii][Ll][Ll][Ss])
             # Case-insensitive: on Windows filesystems (Git Bash) 'SKILLS'
             # resolves to the same directory as the pool.
@@ -86,34 +94,26 @@ _cp_validate_name() {
 # links, real directories, and files are left alone.
 
 _cp_validate_skill_name() {
-    case "$1" in
-        "")
-            _cp_die "skill name must not be empty"
-            return 1
-            ;;
-        .*)
-            _cp_die "invalid skill name '$1': must not start with '.'"
-            return 1
-            ;;
-        *..*)
-            _cp_die "invalid skill name '$1': must not contain '..'"
-            return 1
-            ;;
-        */*)
-            _cp_die "invalid skill name '$1': must not contain '/'"
-            return 1
-            ;;
-        *\\*)
-            _cp_die "invalid skill name '$1': must not contain '\\'"
-            return 1
-            ;;
+    _cp_validate_name_core "$1" skill
+}
+
+# Returns 0 when link target $1 lies under pool directory $2. Case-folds
+# on MSYS because the shared Windows data directory is case-insensitive
+# and %LOCALAPPDATA% casing can differ between the shell that created a
+# junction and this one (matches the cmd `if /i` and ps1
+# OrdinalIgnoreCase behavior).
+_cp_target_in_pool() {
+    if _cp_is_msys; then
+        _cp_tip_t=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+        _cp_tip_p=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+    else
+        _cp_tip_t="$1"
+        _cp_tip_p="$2"
+    fi
+    case "$_cp_tip_t" in
+        "$_cp_tip_p"/*) return 0 ;;
     esac
-    case "$1" in
-        *[!A-Za-z0-9_-]*)
-            _cp_die "invalid skill name '$1': use only letters, digits, hyphens, underscores"
-            return 1
-            ;;
-    esac
+    return 1
 }
 
 # Prints the literal target of link $1 (fails if not a link). On MSYS the
@@ -241,13 +241,9 @@ _cp_skills_sync_one() {
     # Pass 1: drop managed links that are dangling or no longer desired.
     # The ls guard keeps zsh's nomatch from aborting on an empty glob.
     [ -n "$(ls "$_cp_ss_sdir" 2>/dev/null)" ] && for _cp_ss_e in "$_cp_ss_sdir"/*; do
-        [ -e "$_cp_ss_e" ] || [ -L "$_cp_ss_e" ] || continue
         [ -L "$_cp_ss_e" ] || continue
         _cp_ss_t=$(_cp_link_target "$_cp_ss_e") || continue
-        case "$_cp_ss_t" in
-            "$_cp_ss_pool"/*) ;;
-            *) continue ;;
-        esac
+        _cp_target_in_pool "$_cp_ss_t" "$_cp_ss_pool" || continue
         _cp_ss_b="${_cp_ss_e##*/}"
         if [ ! -d "${_cp_ss_pool}/${_cp_ss_b}" ] \
             || ! printf '%s\n' "$_cp_ss_desired" | grep -Fqx "$_cp_ss_b"; then
@@ -266,9 +262,9 @@ _cp_skills_sync_one() {
         _cp_ss_dst="${_cp_ss_sdir}/${_cp_ss_want}"
         if [ -L "$_cp_ss_dst" ]; then
             _cp_ss_t=$(_cp_link_target "$_cp_ss_dst")
-            case "$_cp_ss_t" in
-                "$_cp_ss_pool"/*) continue ;;
-            esac
+            if _cp_target_in_pool "$_cp_ss_t" "$_cp_ss_pool"; then
+                continue
+            fi
             _cp_die "skill '${_cp_ss_want}': unmanaged entry already at ${_cp_ss_dst}; skipping"
             continue
         fi
@@ -1439,10 +1435,11 @@ SETTINGSEOF
                             _cp_sk_status="dangling (target missing)"
                         elif [ -L "$_cp_sk_dst" ]; then
                             _cp_sk_t=$(_cp_link_target "$_cp_sk_dst") || _cp_sk_t=""
-                            case "$_cp_sk_t" in
-                                "$_cp_sk_pool"/*) _cp_sk_status="linked" ;;
-                                *) _cp_sk_status="conflict (unmanaged entry)" ;;
-                            esac
+                            if _cp_target_in_pool "$_cp_sk_t" "$_cp_sk_pool"; then
+                                _cp_sk_status="linked"
+                            else
+                                _cp_sk_status="conflict (unmanaged entry)"
+                            fi
                         elif [ -e "$_cp_sk_dst" ]; then
                             _cp_sk_status="conflict (unmanaged entry)"
                         elif printf '%s\n' "$_cp_sk_desired" | grep -Fqx "$_cp_sk_n"; then

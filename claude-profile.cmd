@@ -1083,6 +1083,10 @@ echo Run 'claude-profile skills sync --all' to link it into unfiltered profiles.
 exit /b 0
 
 :cmd_skills_unregister
+if not "%~4"=="" (
+    echo claude-profile: unexpected argument '%~4' >&2
+    exit /b 1
+)
 set "_sk_force=0"
 set "_sk_name="
 if /i "%~2"=="--force" (

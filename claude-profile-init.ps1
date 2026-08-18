@@ -470,7 +470,7 @@ function Get-CPDesiredSkills {
 # Without this, pool operations would enumerate its internals as skills
 # and link them into every profile.
 function Test-CPPoolGuard {
-    $poolDir = Join-Path (Get-CPDataDir) 'skills'
+    $poolDir = Get-CPSkillPoolDir
     if (-not (Test-Path -LiteralPath $poolDir -PathType Container)) { return $true }
     if ((Test-Path -LiteralPath (Join-Path $poolDir 'settings.json') -PathType Leaf) -or
         (Test-Path -LiteralPath (Join-Path $poolDir '.credentials.json') -PathType Leaf)) {
@@ -485,7 +485,7 @@ function Test-CPPoolGuard {
 function Sync-CPProfileSkills {
     param([string]$Name)
     $dataDir = Get-CPDataDir
-    $poolDir = Join-Path $dataDir 'skills'
+    $poolDir = Get-CPSkillPoolDir
     $profileDir = Join-Path $dataDir $Name
     $skillsDir = Join-Path $profileDir 'skills'
     if (-not (Test-CPPoolGuard)) { return $false }
@@ -653,7 +653,15 @@ function claude-profile {
         } elseif ($env:CLAUDE_CONFIG_DIR) {
             $normalized = $env:CLAUDE_CONFIG_DIR.Replace('\', '/')
             $normalizedData = $DataDir.Replace('\', '/')
-            if ($normalized.StartsWith("$normalizedData/")) {
+            # Case-insensitive on Windows: CLAUDE_CONFIG_DIR may be
+            # inherited from a cmd/Git Bash session with different
+            # %LOCALAPPDATA% casing.
+            $cmp = if ($IsWindows -or ($PSVersionTable.PSEdition -eq 'Desktop')) {
+                [System.StringComparison]::OrdinalIgnoreCase
+            } else {
+                [System.StringComparison]::Ordinal
+            }
+            if ($normalized.StartsWith("$normalizedData/", $cmp)) {
                 $name = Split-Path $env:CLAUDE_CONFIG_DIR -Leaf
             } else {
                 _cp_die 'active CLAUDE_CONFIG_DIR is not a managed profile; pass a profile name'
@@ -814,7 +822,7 @@ function claude-profile {
             Write-Host "Config directory: $ProfileDir"
             # A new profile has no manifest, so this links every pool skill
             # (the backward-compatible "all" default). No pool: no-op.
-            if (Test-Path (Join-Path $DataDir 'skills') -PathType Container) {
+            if (Test-Path (Get-CPSkillPoolDir) -PathType Container) {
                 Sync-CPProfileSkills -Name $ArgName | Out-Null
             }
         }
@@ -843,7 +851,7 @@ function claude-profile {
                 Write-Host 'No profiles found. Create one with: claude-profile create <name>'
                 return
             }
-            $PoolCount = @(Get-CPPoolSkills -PoolDir (Join-Path $DataDir 'skills')).Count
+            $PoolCount = @(Get-CPPoolSkills -PoolDir (Get-CPSkillPoolDir)).Count
             foreach ($Entry in $Entries) {
                 $SkillNote = ''
                 $Manifest = Join-Path $Entry.FullName 'skills.conf'
@@ -963,7 +971,7 @@ function claude-profile {
         }
 
         'skills' {
-            $PoolDir = Join-Path $DataDir 'skills'
+            $PoolDir = Get-CPSkillPoolDir
             if (-not (Test-CPPoolGuard)) { return }
             $Sub = if ($args.Count -gt 1) { $args[1] } else { $null }
             switch ($Sub) {
@@ -989,7 +997,10 @@ function claude-profile {
                     }
                     New-Item -ItemType Directory -Path $PoolDir -Force | Out-Null
                     $PoolEntry = Join-Path $PoolDir $SkillName
-                    if (Test-Path -LiteralPath $PoolEntry) {
+                    # Get-Item -Force sees dangling junctions too, which
+                    # plain Test-Path resolves (to $false) and would let
+                    # fall through to a misleading link-creation failure.
+                    if (Get-Item -LiteralPath $PoolEntry -Force -ErrorAction SilentlyContinue) {
                         _cp_die "skill '$SkillName' is already registered"
                         return
                     }
@@ -1006,6 +1017,12 @@ function claude-profile {
                     $Rest = @($args | Select-Object -Skip 2)
                     $Force = $Rest -contains '--force'
                     $Names = @($Rest | Where-Object { $_ -ne '--force' })
+                    foreach ($Token in $Names) {
+                        if ("$Token".StartsWith('-')) {
+                            _cp_die "unknown option '$Token'"
+                            return
+                        }
+                    }
                     if ($Names.Count -ne 1) {
                         _cp_die 'usage: claude-profile skills unregister [--force] <name>'
                         return
@@ -1371,7 +1388,7 @@ Examples:
             }
             # Skills annotation for the active (else default) profile;
             # silent until a skill pool exists.
-            $PoolDir = Join-Path $DataDir 'skills'
+            $PoolDir = Get-CPSkillPoolDir
             if (Test-Path -LiteralPath $PoolDir -PathType Container) {
                 $SkillProfile = if ($Active) { $Active } else { $CurDefault }
                 if ($SkillProfile -and (Test-Path (Join-Path $DataDir $SkillProfile) -PathType Container)) {
