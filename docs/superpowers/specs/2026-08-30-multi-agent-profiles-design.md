@@ -81,7 +81,8 @@ explicit environment credentials are passed through unchanged.
 ## Cross-platform surface
 
 `agent-profile.sh` is strict POSIX sh and is sourceable in bash, zsh, and
-other supported POSIX shells. `agent-profile-init.ps1` is dot-sourceable in
+other supported POSIX shells. `agent-profile.fish` is a native Fish adapter
+sourceable from `config.fish`. `agent-profile-init.ps1` is dot-sourceable in
 PowerShell 5.1+ and PowerShell Core. `agent-profile.cmd` and target launcher
 shims provide the same manager and launch behavior on cmd.exe, where caller
 environment changes require `call` and transparent function wrappers are not
@@ -93,6 +94,8 @@ The POSIX implementation is covered by a dependency-free shell test harness
 using temporary HOME/XDG directories and fake `agy`, GUI, and `codex`
 executables. Tests cover name validation, copy-from-live, copy-from-default,
 no-overwrite behavior, default/active resolution, environment isolation, and
-GUI flag injection. Static checks cover shell syntax and shellcheck when
-available; PowerShell and cmd files receive parser/static checks when their
-interpreters are available.
+GUI flag injection. The Fish adapter has a separate native smoke harness that
+also covers Claude's wrapper, Codex, GUI launcher detection, and
+directory-local switching. Static checks cover shell syntax and shellcheck
+when available; PowerShell and cmd files receive parser/static checks when
+their interpreters are available.

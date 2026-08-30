@@ -14,7 +14,7 @@ Each profile is a complete, isolated Claude Code configuration directory contain
 
 ## Install
 
-- Linux / macOS / WSL: `curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.sh | sh`
+- Linux / macOS / WSL / Fish: `curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.sh | sh` (the installer detects Fish and sources native adapters)
 - Windows PowerShell: `irm https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.ps1 | iex`
 
 ## Commands
@@ -45,12 +45,18 @@ selected profile. Antigravity uses a child `HOME` for the CLI and
 `--user-data-dir` for the GUI; Codex uses `CODEX_HOME`. OS keyring credentials
 are not copied.
 
+Fish is supported through native sourceable adapters. Source
+`claude-profile.fish` and `agent-profile.fish` from
+`~/.config/fish/config.fish`; do not source the POSIX `.sh` adapters from Fish.
+
 ## Source Code
 
 - [claude-profile.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile.sh): POSIX shell implementation (bash, zsh)
+- [claude-profile.fish](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile.fish): native Fish implementation
 - [claude-profile-init.ps1](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile-init.ps1): PowerShell implementation
 - [claude-profile.cmd](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile.cmd): Windows cmd.exe batch implementation
 - [agent-profile.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile.sh): Antigravity and Codex POSIX wrappers
+- [agent-profile.fish](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile.fish): Antigravity and Codex native Fish wrappers
 - [agent-profile-init.ps1](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile-init.ps1): Antigravity and Codex PowerShell wrappers
 - [agent-profile.cmd](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile.cmd): Antigravity and Codex cmd.exe manager
 - [install.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/install.sh): Unix installer

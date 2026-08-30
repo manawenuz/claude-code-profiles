@@ -6,13 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Cross-platform shell functions for managing multiple Claude Code configuration profiles via `CLAUDE_CONFIG_DIR`. Each profile is a complete, isolated config directory. A transparent `claude()` wrapper auto-resolves the active profile so users just run `claude` normally.
 
-Three equivalent implementations: POSIX sh (sourced), PowerShell (dot-sourced), and Windows cmd batch.
+Four supported adapters: POSIX sh (sourced), Fish (sourced), PowerShell (dot-sourced), and Windows cmd batch.
 
 ## Architecture
 
 The POSIX and PowerShell implementations are sourceable function files (not standalone scripts). They each define two functions: `claude()` (transparent wrapper) and `claude-profile()` (management). The cmd batch script is standalone since cmd lacks a function-sourcing mechanism.
 
 - **`claude-profile.sh`** (POSIX sh) — reference implementation. Sourced in `.bashrc`/`.zshrc`. Provides `claude()` wrapper that auto-resolves the default profile before calling the real binary via `command claude`. Provides `claude-profile()` for management commands. Strict POSIX only: no `local`, no `[[ ]]`, no arrays, no bashisms. Uses `printf` over `echo`, `_cp_`-prefixed variables, `return` (not `exit` — runs in user's shell). On Git Bash / MSYS2 (detected via `$MSYSTEM`), profiles are stored at `%LOCALAPPDATA%\claude-profiles\` and paths are converted via `cygpath -w` before invoking `claude.exe` so they are shared with the cmd/PowerShell implementations.
+- **`claude-profile.fish`** (Fish 3+) — native Fish adapter. Sourced in `~/.config/fish/config.fish`. Keeps session-changing commands and directory-local switching in Fish; delegates the shared skill pool and updater to the POSIX adapter so their filesystem semantics stay identical.
 - **`claude-profile-init.ps1`** (PowerShell 5.1+/pwsh 6+) — cross-platform. Dot-sourced in `$PROFILE`. Same two-function model. Uses `$args` manual parsing (not `param()`) to avoid conflicts with PowerShell parameter binding. `Get-Command -CommandType Application` to find the real `claude` binary past the function.
 - **`claude-profile.cmd`** (Windows batch) — standalone script. Uses `goto :label` dispatch, `setlocal enabledelayedexpansion`, `endlocal & set` idiom to leak `CLAUDE_CONFIG_DIR` to the caller. No transparent `claude` wrapper (cmd limitation). Users run `call claude-profile.cmd use <name>` then `claude` separately.
 
@@ -21,12 +22,15 @@ Profile data lives at `$XDG_DATA_HOME/claude-profiles/` (Linux/macOS/WSL, defaul
 The tool itself is installed at `$XDG_DATA_HOME/claude-profile/` (Linux/macOS) or `%LOCALAPPDATA%\claude-profile\` (Windows) — note the singular form, distinct from the plural `claude-profiles/` data directory.
 
 The provider-neutral layer is installed beside it as `agent-profile.sh`,
+`agent-profile.fish`,
 `agent-profile-init.ps1`, `agent-profile.cmd`, and the Windows launcher shims
 `agy.cmd`, `antigravity.cmd`, `antigravity-ide.cmd`, and `codex.cmd`.
+The Fish adapter is native Fish syntax and exposes the same provider manager
+and launcher functions as the POSIX adapter.
 
 ## Command Interface
 
-All three implementations share the same command interface:
+All supported adapters share the same command interface:
 
 | Command | Description |
 |---------|-------------|
@@ -36,7 +40,7 @@ All three implementations share the same command interface:
 | `claude-profile list` | List all profiles (marks default and active) |
 | `claude-profile default [name]` | Get or set the default profile |
 | `claude-profile local [name]` | Show, set, or `--remove` the directory-local `.claude-profile` |
-| `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (sh/ps1 only) |
+| `claude-profile auto [on\|off\|status]` | Control directory-local auto-switching (sh/ps1/Fish) |
 | `claude-profile skills ...` | Manage the shared skill pool and per-profile selections (see below) |
 | `claude-profile which [name]` | Show the resolved config directory path |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
@@ -57,7 +61,7 @@ A `.claude-profile` file (first non-empty, non-comment line = profile name) swit
 
 The pin is tracked via an exported `CLAUDE_PROFILE_AUTO_SET` marker: auto-switching only manages `CLAUDE_CONFIG_DIR` when its value equals that marker, so anything set by hand (or inherited from outside) is left alone. Exporting it means nested shells keep auto-managing rather than treating the inherited value as manual.
 
-Directory-change hooks differ per shell: zsh `chpwd`, bash `PROMPT_COMMAND`, `cd` wrapper elsewhere; PowerShell 6+ `LocationChangedAction`, PowerShell 5.1 `prompt` wrapper. cmd.exe has no hook — a bare `call claude-profile.cmd` resolves the dotfile at invocation time instead.
+Directory-change hooks differ per shell: zsh `chpwd`, bash `PROMPT_COMMAND`, Fish's `PWD` variable event, and a `cd` wrapper elsewhere; PowerShell 6+ `LocationChangedAction`, PowerShell 5.1 `prompt` wrapper. cmd.exe has no hook — a bare `call claude-profile.cmd` resolves the dotfile at invocation time instead.
 
 Because bash re-runs the resolver on every prompt, `_cp_auto_switch` short-circuits when `$PWD` is unchanged and the upward walk uses only parameter expansion (no `dirname` fork per component). That short-circuit also rate-limits the "invalid/missing profile" warnings to once per directory entry.
 
@@ -90,7 +94,7 @@ comparison against `<pool>\<name>`.
 
 ## Validation Rules
 
-Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, contains `/` or `\` or `..`. This prevents path traversal — all three implementations enforce this identically.
+Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, contains `/` or `\` or `..`. This prevents path traversal — all supported adapters enforce this identically.
 
 Agent profile data lives at `${AGENT_PROFILE_DATA_DIR}` when set, otherwise
 `$XDG_DATA_HOME/agent-profiles/` (default `~/.local/share/agent-profiles/`) or
@@ -107,6 +111,8 @@ without `--force`.
 shellcheck claude-profile.sh         # Lint POSIX sh function file
 checkbashisms claude-profile.sh      # Verify no bashisms (hyphenated function name is expected)
 bash tests/test-agent-profile.sh     # Provider behavior tests
+fish --no-config tests/test-fish-profile.fish # Fish adapter behavior tests
+fish -n claude-profile.fish agent-profile.fish tests/test-fish-profile.fish
 ```
 
 No build step. No test framework. Manual verification by running commands against real profiles.
@@ -125,4 +131,4 @@ Use `git worktree` (via `.worktrees/`) for parallel branch work.
 
 ## When Modifying
 
-Any behavioral change must be applied to all three implementations (`claude-profile.sh`, `claude-profile.cmd`, `claude-profile-init.ps1`) plus updated in `README.md`. The install scripts (`install.sh`, `install.ps1`) reference `https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/` for download URLs.
+Any behavioral change must be applied to all supported adapters (`claude-profile.sh`, `claude-profile.fish`, `claude-profile.cmd`, `claude-profile-init.ps1`) plus updated in `README.md`. The install scripts (`install.sh`, `install.ps1`) reference `https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/` for download URLs.

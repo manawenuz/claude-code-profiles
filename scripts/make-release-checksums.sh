@@ -17,7 +17,9 @@ fi
 
 for f in VERSION \
     claude-profile.sh claude-profile-init.ps1 claude-profile.cmd \
+    claude-profile.fish \
     agent-profile.sh agent-profile-init.ps1 agent-profile.cmd \
+    agent-profile.fish \
     agy.cmd antigravity.cmd antigravity-ide.cmd codex.cmd; do
     if [ ! -f "$f" ]; then
         echo "error: $f not found in current directory (run from repo root)" >&2

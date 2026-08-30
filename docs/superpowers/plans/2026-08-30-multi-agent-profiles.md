@@ -98,3 +98,19 @@
 - `zsh tests/test-agent-profile.sh`: 6 passed, 0 failed.
 - `bash -n`, `zsh -n`, `sh -n`, and `git diff --check` pass for the available files.
 - `pwsh`, Windows PowerShell, and `cmd.exe` are not available on the development host, so their runtime checks must be performed on Windows.
+
+### Task 6: Native Fish adapters
+
+**Files:**
+- Create: `claude-profile.fish`
+- Create: `agent-profile.fish`
+- Create: `tests/test-fish-profile.fish`
+- Modify: `install.sh`, `README.md`, `CLAUDE.md`, `docs/llms.txt`,
+  `docs/llms-full.txt`, `docs/index.html`, `scripts/make-release-checksums.sh`
+
+- [x] Add native Fish wrappers for Claude, Antigravity CLI/GUI, and Codex.
+- [x] Preserve the shared on-disk layout and Fish session semantics, including
+  directory-local Claude profiles and launcher environment isolation.
+- [x] Install/source both Fish adapters and include them in release checksums.
+- [x] Add a no-config Fish smoke harness covering wrappers, live snapshots,
+  GUI launcher detection, Codex, and directory-local switching.

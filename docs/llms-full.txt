@@ -12,7 +12,7 @@ Website: https://pegasusheavy.github.io/claude-code-profiles/
 
 ## Install
 
-**Linux / macOS / WSL:**
+**Linux / macOS / WSL / Fish:**
 
 ```
 curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.sh | sh
@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/m
 irm https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.ps1 | iex
 ```
 
-The installer downloads the appropriate scripts and configures your shell. Restart your shell (or open a new terminal) after installing.
+The installer downloads the appropriate scripts and configures your shell. When `$SHELL` is Fish, it installs native `.fish` adapters and sources them from `~/.config/fish/config.fish`. Restart your shell (or open a new terminal) after installing.
 
 ## Quick Start
 
@@ -121,7 +121,7 @@ Your shell then switches to `work` whenever you `cd` into that tree, and back to
 
 An explicit `claude-profile use <name>` pins the session and wins over any `.claude-profile` until `claude-profile auto on`. `claude-profile auto off` disables auto-switching for the session, and `claude-profile auto status` shows what is in effect. Set `CLAUDE_PROFILE_NO_AUTO_SWITCH=1` to disable it entirely, or `CLAUDE_PROFILE_AUTO_QUIET=1` to switch silently.
 
-Hooking into directory changes is per-shell: zsh uses `chpwd`, bash uses `PROMPT_COMMAND`, and other POSIX shells get a `cd` wrapper. PowerShell 6+ uses `LocationChangedAction`; Windows PowerShell 5.1 hooks the `prompt` function. cmd.exe has neither a `cd` hook nor a transparent `claude` wrapper, so it cannot switch automatically — instead a bare `call claude-profile.cmd` prefers the nearest `.claude-profile` over the default profile.
+Hooking into directory changes is per-shell: zsh uses `chpwd`, bash uses `PROMPT_COMMAND`, Fish uses its `PWD` variable event, and other POSIX shells get a `cd` wrapper. PowerShell 6+ uses `LocationChangedAction`; Windows PowerShell 5.1 hooks the `prompt` function. cmd.exe has neither a `cd` hook nor a transparent `claude` wrapper, so it cannot switch automatically — instead a bare `call claude-profile.cmd` prefers the nearest `.claude-profile` over the default profile.
 
 ### Profile Storage
 
@@ -150,17 +150,21 @@ Profile names can contain letters, digits, hyphens, and underscores. Examples: `
 | Script | Platform | Shell |
 |--------|----------|-------|
 | `claude-profile.sh` | Linux, macOS, WSL | bash, zsh (sourced) |
+| `claude-profile.fish` | Linux, macOS, WSL | fish (sourced) |
 | `claude-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
 | `claude-profile.cmd` | Windows | cmd.exe (use with `call` prefix) |
 | `agent-profile.sh` | Linux, macOS, WSL | bash, zsh (sourced) |
+| `agent-profile.fish` | Linux, macOS, WSL | fish (sourced) |
 | `agent-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
 | `agent-profile.cmd` + target shims | Windows | cmd.exe |
 
 ## Architecture
 
-All three scripts implement the same command interface (`create`, `list`, `default`, `which`, `use`, `delete`, `help`) with platform-appropriate idioms:
+All supported adapters implement the same command interface (`create`, `list`, `default`, `which`, `use`, `delete`, `help`) with platform-appropriate idioms:
 
 - **claude-profile.sh** (POSIX sh) — reference implementation. Strict POSIX only: no `local`, no `[[ ]]`, no arrays, no bashisms. Uses `printf` over `echo`, underscore-prefixed variables (`_cp_name`) instead of `local`, `command claude "$@"` to call the real binary past the function.
+- **claude-profile.fish** (Fish 3+) — native Fish syntax. Session-changing commands and directory-local switching stay in Fish; skill-pool and updater commands delegate to the POSIX adapter so the on-disk behavior remains shared.
+- **agent-profile.fish** (Fish 3+) — native Fish wrappers for `agy`, Antigravity GUI, and Codex. It uses the same provider namespaces and child-process environment isolation as the POSIX provider adapter.
 - **claude-profile-init.ps1** (PowerShell 5.1+/pwsh 6+) — cross-platform. Uses `$args` manual parsing (not `param()`) to avoid conflicts with PowerShell parameter binding. `Get-Command claude -CommandType Application` to find the real binary past the function.
 - **claude-profile.cmd** (Windows batch) — uses `goto :label` dispatch, `setlocal enabledelayedexpansion`, `endlocal & set` idiom to pass variables across scope boundaries. Sets `CLAUDE_CONFIG_DIR` without launching claude (user runs claude separately).
 
@@ -168,7 +172,7 @@ Profile data lives at `$XDG_DATA_HOME/claude-profiles/` (Linux/macOS, default `~
 
 ### Validation Rules
 
-Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, contains `/` or `\` or `..`. This prevents path traversal — all three scripts enforce this identically.
+Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, contains `/` or `\` or `..`. This prevents path traversal — all supported adapters enforce this identically.
 
 ## Manual Install
 
@@ -186,6 +190,29 @@ curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/m
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"' >> ~/.bashrc
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"' >> ~/.bashrc
 ```
+
+**Fish:**
+
+```fish
+set -l data_dir $XDG_DATA_HOME
+if test -z "$data_dir"
+    set data_dir "$HOME/.local/share"
+end
+set -l config_dir $XDG_CONFIG_HOME
+if test -z "$config_dir"
+    set config_dir "$HOME/.config"
+end
+set -l install_dir "$data_dir/claude-profile"
+set -l fish_config "$config_dir/fish/config.fish"
+mkdir -p "$install_dir" (path dirname "$fish_config")
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.fish -o "$install_dir/claude-profile.fish"
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.fish -o "$install_dir/agent-profile.fish"
+printf "\nsource '%s/claude-profile.fish'\n" "$install_dir" >> "$fish_config"
+printf "source '%s/agent-profile.fish'\n" "$install_dir" >> "$fish_config"
+```
+
+The Fish adapters are native Fish syntax; do not source the `.sh` adapters from
+Fish. They share the same profile directories and command behavior.
 
 **Windows (PowerShell):**
 

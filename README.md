@@ -10,7 +10,7 @@ Antigravity GUI) and OpenAI Codex. Claude remains backward compatible through
 
 ## Install
 
-**Linux / macOS / WSL / Git Bash (MSYS2):**
+**Linux / macOS / WSL / Git Bash (MSYS2) / Fish:**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.sh | sh
@@ -22,7 +22,10 @@ curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/m
 irm https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/install.ps1 | iex
 ```
 
-The installer downloads the appropriate scripts and configures your shell. **Restart your shell** (or open a new terminal) after installing.
+The installer downloads the appropriate scripts and configures your shell. When
+`$SHELL` is Fish, it installs native `.fish` adapters and sources them from
+`~/.config/fish/config.fish`. **Restart your shell** (or open a new terminal)
+after installing.
 
 ## Quick Start
 
@@ -92,7 +95,8 @@ profiles:
 | `agent-profile default codex [name]` | Get or set the Codex default |
 | `agent-profile use codex <name>` | Select a Codex profile for this shell |
 
-After sourcing `agent-profile.sh` (or `agent-profile-init.ps1`), the `agy`,
+After sourcing `agent-profile.sh` or `agent-profile.fish` (or dot-sourcing
+`agent-profile-init.ps1`), the `agy`,
 `antigravity`, `antigravity-ide`, and `codex` commands automatically launch
 with the active profile. Target-specific aliases are also available:
 `agy-profile`, `antigravity-profile`, and `codex-profile`.
@@ -202,7 +206,7 @@ Precedence and control:
   current directory.
 
 Hooking into directory changes is per-shell: zsh uses `chpwd`, bash uses
-`PROMPT_COMMAND`, and other POSIX shells get a `cd` wrapper. PowerShell 6+
+`PROMPT_COMMAND`, Fish uses its `PWD` variable event, and other POSIX shells get a `cd` wrapper. PowerShell 6+
 uses `LocationChangedAction`; Windows PowerShell 5.1 hooks the `prompt`
 function.
 
@@ -332,9 +336,11 @@ fixed.
 | Script | Platform | Shell |
 |--------|----------|-------|
 | `claude-profile.sh` | Linux, macOS, WSL, Git Bash / MSYS2 | bash, zsh (sourced) |
+| `claude-profile.fish` | Linux, macOS, WSL | fish (sourced) |
 | `claude-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
 | `claude-profile.cmd` | Windows | cmd.exe (use with `call` prefix) |
 | `agent-profile.sh` | Linux, macOS, WSL, Git Bash / MSYS2 | bash, zsh (sourced) |
+| `agent-profile.fish` | Linux, macOS, WSL | fish (sourced) |
 | `agent-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh (dot-sourced) |
 | `agent-profile.cmd` + target shims | Windows | cmd.exe (use with `call` for manager commands) |
 
@@ -366,6 +372,29 @@ curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/m
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"' >> ~/.bashrc
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"' >> ~/.bashrc
 ```
+
+**Fish:**
+
+```fish
+set -l data_dir $XDG_DATA_HOME
+if test -z "$data_dir"
+    set data_dir "$HOME/.local/share"
+end
+set -l config_dir $XDG_CONFIG_HOME
+if test -z "$config_dir"
+    set config_dir "$HOME/.config"
+end
+set -l install_dir "$data_dir/claude-profile"
+set -l fish_config "$config_dir/fish/config.fish"
+mkdir -p "$install_dir" (path dirname "$fish_config")
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.fish -o "$install_dir/claude-profile.fish"
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.fish -o "$install_dir/agent-profile.fish"
+printf "\nsource '%s/claude-profile.fish'\n" "$install_dir" >> "$fish_config"
+printf "source '%s/agent-profile.fish'\n" "$install_dir" >> "$fish_config"
+```
+
+The Fish adapters are native Fish syntax; do not source the `.sh` adapters from
+Fish. They share the same profile directories and command behavior.
 
 **Windows (PowerShell):**
 
