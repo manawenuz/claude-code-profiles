@@ -57,6 +57,32 @@ claude -p "explain this code"
 | `claude-profile which [name]` | Show the config directory path |
 | `claude-profile help` | Show help |
 
+## Antigravity and Codex Profiles
+
+The provider-neutral `agent-profile` layer manages Antigravity CLI (`agy`),
+Antigravity GUI (`antigravity` / `antigravity-ide`), and Codex profiles while
+leaving `claude-profile` unchanged. Antigravity CLI and GUI share the
+`antigravity` provider namespace.
+
+Examples:
+
+```
+agent-profile copy antigravity hafez
+agent-profile default antigravity hafez
+agy
+antigravity --new-window
+agent-profile copy antigravity default backup
+agent-profile copy codex work
+agent-profile default codex work
+codex
+```
+
+Antigravity live copies include `$HOME/.gemini` and the detected GUI user data
+directory. The CLI runs with a profile-specific child `HOME`; the GUI receives
+`--user-data-dir <profile>/gui-user-data`. Codex runs with
+`CODEX_HOME=<profile>`. Copy refuses an existing destination unless
+`--force` is provided, and OS keyring credentials are not copied or altered.
+
 ## How It Works
 
 Claude Code supports a `CLAUDE_CONFIG_DIR` environment variable that redirects where it stores configuration and data. claude-profile provides a `claude()` shell function that wraps the real `claude` binary:
@@ -106,6 +132,12 @@ Profiles are stored in platform-appropriate locations:
 
 Each profile directory is a complete Claude Code config directory. After creating a profile and launching Claude with it, Claude will populate it with `settings.json`, `.credentials.json`, and everything else it needs.
 
+Agent profiles are stored at `${AGENT_PROFILE_DATA_DIR}` when set, otherwise
+`$XDG_DATA_HOME/agent-profiles/` (default `~/.local/share/agent-profiles/`) or
+`%LOCALAPPDATA%\\agent-profiles\\` on Windows. Antigravity profiles contain
+`home/.gemini` and `gui-user-data`; Codex profiles contain the contents of
+`CODEX_HOME`.
+
 ### Profile Names
 
 Profile names can contain letters, digits, hyphens, and underscores. Examples: `work`, `personal`, `client-acme`, `side_project`.
@@ -117,6 +149,9 @@ Profile names can contain letters, digits, hyphens, and underscores. Examples: `
 | `claude-profile.sh` | Linux, macOS, WSL | bash, zsh (sourced) |
 | `claude-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
 | `claude-profile.cmd` | Windows | cmd.exe (use with `call` prefix) |
+| `agent-profile.sh` | Linux, macOS, WSL | bash, zsh (sourced) |
+| `agent-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
+| `agent-profile.cmd` + target shims | Windows | cmd.exe |
 
 ## Architecture
 
@@ -141,9 +176,12 @@ Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, conta
 mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile"
 curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.sh \
   -o "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.sh \
+  -o "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"
 
 # Add to shell profile (.bashrc or .zshrc)
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"' >> ~/.bashrc
+echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"' >> ~/.bashrc
 ```
 
 **Windows (PowerShell):**
@@ -153,8 +191,15 @@ $dir = "$env:LOCALAPPDATA\claude-profile"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile-init.ps1" -OutFile "$dir\claude-profile-init.ps1"
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.cmd" -OutFile "$dir\claude-profile.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile-init.ps1" -OutFile "$dir\agent-profile-init.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.cmd" -OutFile "$dir\agent-profile.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agy.cmd" -OutFile "$dir\agy.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/antigravity.cmd" -OutFile "$dir\antigravity.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/antigravity-ide.cmd" -OutFile "$dir\antigravity-ide.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/codex.cmd" -OutFile "$dir\codex.cmd"
 # Add to PowerShell profile
 Add-Content -Path $PROFILE -Value ". '$dir\claude-profile-init.ps1'"
+Add-Content -Path $PROFILE -Value ". '$dir\agent-profile-init.ps1'"
 # Add to PATH for cmd.exe
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($path -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$path;$dir", 'User') }

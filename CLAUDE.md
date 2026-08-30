@@ -20,6 +20,10 @@ Profile data lives at `$XDG_DATA_HOME/claude-profiles/` (Linux/macOS/WSL, defaul
 
 The tool itself is installed at `$XDG_DATA_HOME/claude-profile/` (Linux/macOS) or `%LOCALAPPDATA%\claude-profile\` (Windows) — note the singular form, distinct from the plural `claude-profiles/` data directory.
 
+The provider-neutral layer is installed beside it as `agent-profile.sh`,
+`agent-profile-init.ps1`, `agent-profile.cmd`, and the Windows launcher shims
+`agy.cmd`, `antigravity.cmd`, `antigravity-ide.cmd`, and `codex.cmd`.
+
 ## Command Interface
 
 All three implementations share the same command interface:
@@ -37,6 +41,13 @@ All three implementations share the same command interface:
 | `claude-profile which [name]` | Show the resolved config directory path |
 | `claude-profile delete <name>` | Delete a profile (with confirmation) |
 | `claude-profile help` | Show help |
+
+The provider-neutral command is `agent-profile <provider> <command>` (the
+command-first form `agent-profile <command> <provider>` is also accepted).
+Provider aliases `agy`, `antigravity`, `antigravity-cli`, `antigravity-gui`,
+and `antigravity-ide` normalize to the shared `antigravity` namespace; `codex`
+uses its own namespace. Target wrappers launch `agy`, Antigravity GUI, and
+Codex with the selected profile without changing the caller's environment.
 
 ## Directory-Local Profiles
 
@@ -79,11 +90,21 @@ comparison against `<pool>\<name>`.
 
 Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, contains `/` or `\` or `..`. This prevents path traversal — all three implementations enforce this identically.
 
+Agent profile data lives at `${AGENT_PROFILE_DATA_DIR}` when set, otherwise
+`$XDG_DATA_HOME/agent-profiles/` (default `~/.local/share/agent-profiles/`) or
+`%LOCALAPPDATA%\agent-profiles\` on Windows. Antigravity CLI uses a child
+`HOME` rooted at `<profile>/home`; the GUI uses
+`--user-data-dir <profile>/gui-user-data`; Codex uses
+`CODEX_HOME=<profile>`. The `copy` command snapshots live data or copies a
+managed source through a temporary sibling and refuses accidental overwrites
+without `--force`.
+
 ## Checking Scripts
 
 ```sh
 shellcheck claude-profile.sh         # Lint POSIX sh function file
 checkbashisms claude-profile.sh      # Verify no bashisms (hyphenated function name is expected)
+bash tests/test-agent-profile.sh     # Provider behavior tests
 ```
 
 No build step. No test framework. Manual verification by running commands against real profiles.

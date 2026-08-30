@@ -4,6 +4,10 @@ Manage multiple [Claude Code](https://code.claude.com) configuration profiles. S
 
 Each profile is a complete, isolated Claude Code configuration directory (settings, credentials, MCP servers, CLAUDE.md, history -- everything). Once configured, `claude` automatically uses your active profile -- no special launch command needed.
 
+The repository also provides `agent-profile` for Antigravity (`agy` and the
+Antigravity GUI) and OpenAI Codex. Claude remains backward compatible through
+`claude-profile`.
+
 ## Install
 
 **Linux / macOS / WSL / Git Bash (MSYS2):**
@@ -34,6 +38,12 @@ claude-profile default work
 claude
 claude --resume
 claude -p "explain this code"
+
+# Snapshot your current Antigravity login into a named profile
+agent-profile copy antigravity hafez
+agent-profile default antigravity hafez
+agy
+antigravity --new-window
 ```
 
 ## Commands
@@ -61,6 +71,31 @@ claude -p "explain this code"
 | `claude-profile update [--force]` | Update to the latest release |
 | `claude-profile help` | Show help |
 
+### Antigravity and Codex commands
+
+`agent-profile` accepts either `agent-profile <provider> <command>` or
+`agent-profile <command> <provider>`. The provider name `antigravity` covers
+both the `agy` CLI and the Antigravity GUI, so they use the same named
+profiles:
+
+| Command | Description |
+|---------|-------------|
+| `agent-profile copy antigravity <name>` | Snapshot current Antigravity CLI and GUI data |
+| `agent-profile copy antigravity default <name>` | Copy the managed Antigravity default |
+| `agent-profile create antigravity <name>` | Create an empty Antigravity profile |
+| `agent-profile default antigravity [name]` | Get or set the Antigravity default |
+| `agent-profile use antigravity <name>` | Select an Antigravity profile for this shell |
+| `agent-profile list antigravity` | List Antigravity profiles |
+| `agent-profile which antigravity [name]` | Print a profile path |
+| `agent-profile copy codex <name>` | Snapshot the current Codex `CODEX_HOME` |
+| `agent-profile default codex [name]` | Get or set the Codex default |
+| `agent-profile use codex <name>` | Select a Codex profile for this shell |
+
+After sourcing `agent-profile.sh` (or `agent-profile-init.ps1`), the `agy`,
+`antigravity`, `antigravity-ide`, and `codex` commands automatically launch
+with the active profile. Target-specific aliases are also available:
+`agy-profile`, `antigravity-profile`, and `codex-profile`.
+
 ## How It Works
 
 Claude Code supports a `CLAUDE_CONFIG_DIR` environment variable that redirects where it stores configuration and data. `claude-profile` provides a `claude()` shell function that wraps the real `claude` binary:
@@ -71,6 +106,33 @@ Claude Code supports a `CLAUDE_CONFIG_DIR` environment variable that redirects w
 4. The real `claude` binary is then called with all your arguments.
 
 This means you never need to think about profiles during normal use -- just run `claude` as you always have.
+
+### Antigravity and Codex profile isolation
+
+Antigravity CLI stores its settings and login files below
+`~/.gemini/antigravity-cli`; the profile wrapper launches `agy` with a
+profile-specific `HOME`. The GUI wrapper launches with
+`--user-data-dir <profile>/gui-user-data`. If the GUI executable is not named
+`antigravity` or `antigravity-ide`, set
+`AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND` to its executable path.
+
+To copy the currently logged-in Antigravity data into `hafez`:
+
+```sh
+agent-profile copy antigravity hafez
+agent-profile default antigravity hafez
+agy                         # Antigravity CLI using hafez
+antigravity --new-window    # Antigravity GUI using hafez
+```
+
+`agent-profile copy antigravity default hafez` copies an existing managed
+default instead of live data. Copy refuses to overwrite an existing profile
+unless `--force` is supplied. Filesystem-backed data is copied; OS keyring
+credentials are intentionally not read or modified, so keyring-backed
+accounts may remain shared between profiles.
+
+Codex profiles are launched with `CODEX_HOME=<profile-path>` and include the
+current `$CODEX_HOME` (or `~/.codex`) when copied.
 
 ### Session Override
 
@@ -203,6 +265,12 @@ Profiles are stored in platform-appropriate locations:
 
 Each profile directory is a complete Claude Code config directory. After creating a profile and launching Claude with it, Claude will populate it with `settings.json`, `.credentials.json`, and everything else it needs.
 
+Agent profiles are stored separately at
+`${AGENT_PROFILE_DATA_DIR:-$XDG_DATA_HOME/agent-profiles}` on POSIX (defaulting
+to `~/.local/share/agent-profiles`) or `%LOCALAPPDATA%\agent-profiles` on
+Windows. Antigravity profiles contain `home/.gemini` and
+`gui-user-data`; Codex profiles contain the contents of `CODEX_HOME`.
+
 ### Profile Names
 
 Profile names can contain letters, digits, hyphens, and underscores. Examples: `work`, `personal`, `client-acme`, `side_project`.
@@ -254,6 +322,9 @@ fixed.
 | `claude-profile.sh` | Linux, macOS, WSL, Git Bash / MSYS2 | bash, zsh (sourced) |
 | `claude-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh 6+ (dot-sourced) |
 | `claude-profile.cmd` | Windows | cmd.exe (use with `call` prefix) |
+| `agent-profile.sh` | Linux, macOS, WSL, Git Bash / MSYS2 | bash, zsh (sourced) |
+| `agent-profile-init.ps1` | Windows, Linux, macOS | PowerShell 5.1+ / pwsh (dot-sourced) |
+| `agent-profile.cmd` + target shims | Windows | cmd.exe (use with `call` for manager commands) |
 
 ### Git Bash / MSYS2 Support
 
@@ -276,9 +347,12 @@ If you prefer not to use the install scripts:
 mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile"
 curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.sh \
   -o "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"
+curl -fsSL https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.sh \
+  -o "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"
 
 # Add to shell profile (.bashrc or .zshrc)
 echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"' >> ~/.bashrc
+echo '. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"' >> ~/.bashrc
 ```
 
 **Windows (PowerShell):**
@@ -288,8 +362,15 @@ $dir = "$env:LOCALAPPDATA\claude-profile"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile-init.ps1" -OutFile "$dir\claude-profile-init.ps1"
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/claude-profile.cmd" -OutFile "$dir\claude-profile.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile-init.ps1" -OutFile "$dir\agent-profile-init.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agent-profile.cmd" -OutFile "$dir\agent-profile.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/agy.cmd" -OutFile "$dir\agy.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/antigravity.cmd" -OutFile "$dir\antigravity.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/antigravity-ide.cmd" -OutFile "$dir\antigravity-ide.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/pegasusheavy/claude-code-profiles/main/codex.cmd" -OutFile "$dir\codex.cmd"
 # Add to PowerShell profile
 Add-Content -Path $PROFILE -Value ". '$dir\claude-profile-init.ps1'"
+Add-Content -Path $PROFILE -Value ". '$dir\agent-profile-init.ps1'"
 # Add to PATH for cmd.exe
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($path -notlike "*$dir*") { [Environment]::SetEnvironmentVariable('Path', "$path;$dir", 'User') }

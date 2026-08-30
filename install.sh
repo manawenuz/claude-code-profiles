@@ -110,7 +110,15 @@ main() {
     step "Installing to ${INSTALL_DIR}/claude-profile.sh..."
     cp "$_tmp_file" "${INSTALL_DIR}/claude-profile.sh"
     chmod +r "${INSTALL_DIR}/claude-profile.sh"
+    rm -f "$_tmp_file"
     info "Installed: ${INSTALL_DIR}/claude-profile.sh"
+
+    step "Downloading agent-profile.sh..."
+    _tmp_file="$(mktemp)"
+    download_file "${REPO_BASE}/agent-profile.sh" "$_tmp_file" || fail "Download failed. Check your network connection."
+    cp "$_tmp_file" "${INSTALL_DIR}/agent-profile.sh"
+    chmod +r "${INSTALL_DIR}/agent-profile.sh"
+    info "Installed: ${INSTALL_DIR}/agent-profile.sh"
 
     step "Downloading VERSION..."
     if download_file "${REPO_BASE}/VERSION" "${INSTALL_DIR}/VERSION"; then
@@ -132,6 +140,7 @@ main() {
     # user's shell at login, not during installation.
     # shellcheck disable=SC2016
     _source_line='. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/claude-profile.sh"'
+    _agent_source_line='. "${XDG_DATA_HOME:-$HOME/.local/share}/claude-profile/agent-profile.sh"'
 
     if [ -n "$_profile_file" ]; then
         # Idempotent: check if already present
@@ -146,6 +155,17 @@ main() {
         info "  $_source_line"
     fi
 
+    if [ -n "$_profile_file" ]; then
+        if [ -f "$_profile_file" ] && grep -qF 'agent-profile.sh' "$_profile_file" 2>/dev/null; then
+            info "Agent profile source line already in $_profile_file"
+        else
+            printf '\n# agent-profile: manage Antigravity and Codex profiles\n%s\n' "$_agent_source_line" >> "$_profile_file"
+            info "Added agent profile source line to $_profile_file"
+        fi
+    else
+        info "  $_agent_source_line"
+    fi
+
     step "Done!"
     info ""
     info "Restart your shell (or run: source $_profile_file) then:"
@@ -153,6 +173,10 @@ main() {
     info "  claude-profile create work     # Create a profile"
     info "  claude-profile default work    # Set it as default"
     info "  claude                         # Runs with the active profile"
+    info ""
+    info "  agent-profile copy antigravity hafez  # Snapshot the current Antigravity login"
+    info "  agent-profile default antigravity hafez"
+    info "  agy                               # Runs with the active Antigravity profile"
     info ""
     info "Run 'claude-profile help' for all commands."
     printf '\n'

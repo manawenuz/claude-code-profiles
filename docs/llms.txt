@@ -30,10 +30,27 @@ Each profile is a complete, isolated Claude Code configuration directory contain
 - `claude-profile delete <name>`: Delete a profile (with confirmation)
 - `claude-profile help`: Show help
 
+## Antigravity and Codex
+
+- `agent-profile copy antigravity hafez`: snapshot the current Antigravity CLI and GUI data
+- `agent-profile copy antigravity default hafez`: copy the managed default profile
+- `agent-profile default antigravity hafez`: set the Antigravity default
+- `agent-profile use antigravity hafez`: select a profile for the current shell
+- `agent-profile copy codex work`: snapshot current Codex data
+- `agent-profile default codex work`: set the Codex default
+
+`agy`, `antigravity`, `antigravity-ide`, and `codex` wrappers launch with the
+selected profile. Antigravity uses a child `HOME` for the CLI and
+`--user-data-dir` for the GUI; Codex uses `CODEX_HOME`. OS keyring credentials
+are not copied.
+
 ## Source Code
 
 - [claude-profile.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile.sh): POSIX shell implementation (bash, zsh)
 - [claude-profile-init.ps1](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile-init.ps1): PowerShell implementation
 - [claude-profile.cmd](https://github.com/pegasusheavy/claude-code-profiles/blob/main/claude-profile.cmd): Windows cmd.exe batch implementation
+- [agent-profile.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile.sh): Antigravity and Codex POSIX wrappers
+- [agent-profile-init.ps1](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile-init.ps1): Antigravity and Codex PowerShell wrappers
+- [agent-profile.cmd](https://github.com/pegasusheavy/claude-code-profiles/blob/main/agent-profile.cmd): Antigravity and Codex cmd.exe manager
 - [install.sh](https://github.com/pegasusheavy/claude-code-profiles/blob/main/install.sh): Unix installer
 - [install.ps1](https://github.com/pegasusheavy/claude-code-profiles/blob/main/install.ps1): Windows installer
