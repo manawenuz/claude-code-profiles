@@ -8,14 +8,14 @@ function Test-APWindows {
 }
 
 function Get-APHome {
-    if (Test-APWindows -and $env:USERPROFILE) { return $env:USERPROFILE }
+    if ((Test-APWindows) -and $env:USERPROFILE) { return $env:USERPROFILE }
     if ($env:HOME) { return $env:HOME }
     return $HOME
 }
 
 function Get-APDataDir {
     if ($env:AGENT_PROFILE_DATA_DIR) { return $env:AGENT_PROFILE_DATA_DIR }
-    if (Test-APWindows -and $env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'agent-profiles') }
+    if ((Test-APWindows) -and $env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'agent-profiles') }
     if ($env:XDG_DATA_HOME) { return (Join-Path $env:XDG_DATA_HOME 'agent-profiles') }
     $base = Join-Path (Get-APHome) '.local/share'
     return (Join-Path $base 'agent-profiles')
@@ -105,7 +105,7 @@ function Get-APGuiSourceDir {
     }
     $configRoot = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $homeDir '.config' }
     $candidates = @()
-    if (Test-APWindows -and $env:APPDATA) {
+    if ((Test-APWindows) -and $env:APPDATA) {
         $candidates += Join-Path $env:APPDATA 'Antigravity IDE'
         $candidates += Join-Path $env:APPDATA 'Antigravity'
     }
@@ -125,7 +125,32 @@ function Copy-APTree {
     param([string]$Source, [string]$Destination)
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     foreach ($item in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
-        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+        try {
+            Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+        } catch {
+            # Copy-Item copies a link by value, so a link whose target no longer
+            # exists -- Chromium's SingletonLock names a host and pid rather than a
+            # real file -- would otherwise abort the entire profile copy. Those links
+            # are runtime state the snapshot drops anyway, so skip them and let any
+            # other failure surface.
+            if ($item.LinkType) { continue }
+            throw
+        }
+    }
+}
+
+# Chromium's singleton files name the host and pid that owned the source instance
+# (SingletonLock -> <host>-<pid>) plus a socket under that instance's temp dir.
+# Copied into a new profile they can make Antigravity decide another instance
+# already owns this user-data-dir and simply focus that window, which looks exactly
+# like the profile failing to switch. They are pure runtime state, so drop them
+# from every snapshot. Removal is attempted unguarded because these are normally
+# links rather than regular files, and a live SingletonSocket may not be either.
+function Remove-APGuiLocks {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    foreach ($name in @('SingletonLock', 'SingletonCookie', 'SingletonSocket')) {
+        Remove-Item -LiteralPath (Join-Path $Path $name) -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -164,6 +189,7 @@ function Copy-APProfile {
             if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) { throw "agent-profile: source profile '$Source' does not exist" }
             Copy-APTree $sourcePath $temp
         }
+        Remove-APGuiLocks (Join-Path $temp 'gui-user-data')
         if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
         Move-Item -LiteralPath $temp -Destination $destination -Force
     } catch {
@@ -318,6 +344,14 @@ function agy {
     return (Start-APProcess (Resolve-APExecutable $command) @($args) $environment)
 }
 
+# HOME (USERPROFILE on Windows) is the knob that actually switches profiles:
+# Antigravity resolves its real state -- account, credentials, conversations --
+# from os.homedir()/.gemini, so a run that only overrides --user-data-dir keeps
+# loading the original profile. Node reads USERPROFILE for os.homedir() on
+# Windows and HOME elsewhere, so both are set for the child, exactly as agy does.
+# --user-data-dir is still passed because it moves Chromium's own user data --
+# most importantly the singleton lock -- which is what lets two profiles run at
+# the same time.
 function Invoke-APGui {
     param([string[]]$Arguments)
     $command = if ($env:AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND) { $env:AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND } else { $null }
@@ -329,10 +363,27 @@ function Invoke-APGui {
     }
     $profile = Get-APSelectedProfile 'antigravity'
     $finalArgs = @($Arguments)
-    if ($profile -and -not (Test-APGuiDataArg $finalArgs)) { $finalArgs = @('--user-data-dir', (Join-Path $profile 'gui-user-data')) + $finalArgs }
-    return (Start-APProcess (Resolve-APExecutable $command) $finalArgs @{})
+    $environment = @{}
+    if ($profile) {
+        $childHome = Join-Path $profile 'home'
+        $guiDataDir = Join-Path $profile 'gui-user-data'
+        New-Item -ItemType Directory -Path $childHome -Force | Out-Null
+        New-Item -ItemType Directory -Path $guiDataDir -Force | Out-Null
+        $environment['HOME'] = $childHome
+        if (Test-APWindows) { $environment['USERPROFILE'] = $childHome }
+        # The "=" form is required: the Antigravity app is a plain Electron app whose
+        # Chromium parser only understands --switch=value and silently ignores the
+        # space-separated spelling. A VS Code derived antigravity-ide accepts it too.
+        if (-not (Test-APGuiDataArg $finalArgs)) { $finalArgs = @("--user-data-dir=$guiDataDir") + $finalArgs }
+    }
+    return (Start-APProcess (Resolve-APExecutable $command) $finalArgs $environment)
 }
 
+# --new-window is a VS Code flag and is inert for the plain Electron app bundle;
+# there a separate HOME plus a separate user-data-dir is what opens another
+# profile alongside the running one. This adapter only ever launches a PATH
+# executable -- Resolve-APExecutable rejects a macOS .app directory and no bundle
+# discovery exists here -- so the flag is always the real new-window mechanism.
 function Invoke-APGuiRestart {
     param([string[]]$Arguments)
     $finalArgs = @($Arguments)

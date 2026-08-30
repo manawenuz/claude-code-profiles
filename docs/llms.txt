@@ -36,16 +36,27 @@ Each profile is a complete, isolated Claude Code configuration directory contain
 - `agent-profile copy antigravity default hafez`: copy the managed default profile
 - `agent-profile default antigravity hafez`: set the Antigravity default
 - `agent-profile use antigravity hafez`: select a profile for the current shell
-- `agent-profile restart antigravity`: open a fresh GUI window using the selected profile
+- `agent-profile restart antigravity`: open a fresh GUI window using the selected profile, alongside any window already running
 - `agent-profile copy codex work`: snapshot current Codex data
 - `agent-profile default codex work`: set the Codex default
 
 `agy`, `antigravity`, `antigravity-ide`, and `codex` wrappers launch with the
-selected profile. Antigravity uses a child `HOME` for the CLI and
-`--user-data-dir` for the GUI; on macOS the GUI adapter also auto-detects
-`/Applications/Antigravity.app` and `~/Applications/Antigravity.app` when no
-GUI command is on `PATH`, starting the bundle as a new app instance. Codex
-uses `CODEX_HOME`. OS keyring credentials are not copied.
+selected profile. Antigravity uses a child `HOME` rooted at `<profile>/home`
+for the CLI and the GUI alike -- it resolves its account, conversations, and
+agent state from `~/.gemini`, so `HOME` is what switches profiles
+(`USERPROFILE` on Windows, where the app reads that instead). The GUI also
+gets `--user-data-dir=<profile>/gui-user-data`, which moves Chromium's user
+data and singleton lock so two profiles can run at once. On macOS the GUI
+adapter auto-detects `/Applications/Antigravity.app` and
+`~/Applications/Antigravity.app` when no GUI command is on `PATH`, and starts
+the bundle with `open -n --env HOME=... -a <bundle> --args --user-data-dir=...`
+as a separate, detached app instance; `agent-profile restart antigravity` adds
+`--new-window` only in PATH-command mode -- any launcher resolved from `PATH`
+or from `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND`, such as a VS Code derived
+`antigravity-ide` -- never for the app bundle, which ignores that flag. Codex
+uses `CODEX_HOME`. Profile snapshots omit Chromium's `SingletonLock`,
+`SingletonCookie`, and `SingletonSocket` files. OS keyring credentials are not
+copied.
 
 Fish is supported through native sourceable adapters. Source
 `claude-profile.fish` and `agent-profile.fish` from

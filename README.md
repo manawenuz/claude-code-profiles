@@ -46,7 +46,7 @@ claude -p "explain this code"
 agent-profile copy antigravity hafez
 agent-profile default antigravity hafez
 agy
-antigravity --new-window
+antigravity
 ```
 
 ## Commands
@@ -114,13 +114,26 @@ This means you never need to think about profiles during normal use -- just run 
 
 ### Antigravity and Codex profile isolation
 
-Antigravity CLI stores its settings and login files below
-`~/.gemini/antigravity-cli`; the profile wrapper launches `agy` with a
-profile-specific `HOME`. The GUI wrapper launches with
-`--user-data-dir <profile>/gui-user-data`. It first looks for the
-`antigravity-ide` or `antigravity` command, then auto-detects the native
-`/Applications/Antigravity.app` bundle on macOS (including an installation in
-`~/Applications`). If the GUI executable is installed elsewhere, set
+Antigravity keeps its real state -- account, login credentials,
+conversations, and agent data -- below `~/.gemini`, for the GUI just as much
+as for the CLI. Both wrappers therefore launch with a profile-specific `HOME`
+rooted at `<profile>/home`, and that is what actually switches profiles. On
+Windows the deciding variable is `USERPROFILE` (which is what the app reads
+there), so the wrappers set it alongside `HOME`.
+
+The GUI additionally receives `--user-data-dir=<profile>/gui-user-data`. That
+moves Chromium's own user data and, more importantly, its singleton lock,
+which is what lets two profiles run side by side; on its own it never switched
+the profile. If you pass your own `--user-data-dir`, nothing is injected and
+yours is honoured -- the profile's `HOME` still applies.
+
+The GUI wrapper first looks for the `antigravity-ide` or `antigravity`
+command, then auto-detects the native `/Applications/Antigravity.app` bundle
+on macOS (including an installation in `~/Applications`). The bundle is
+started with `open -n --env HOME=... -a <bundle> --args --user-data-dir=...`,
+so it receives the profile's `HOME`, runs as a separate instance, and is
+detached from your shell with normal Dock and activation behaviour. If the GUI
+executable is installed elsewhere, set
 `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND` to its executable path.
 
 To copy the currently logged-in Antigravity data into `hafez`:
@@ -129,7 +142,7 @@ To copy the currently logged-in Antigravity data into `hafez`:
 agent-profile copy antigravity hafez
 agent-profile default antigravity hafez
 agy                         # Antigravity CLI using hafez
-antigravity --new-window    # Antigravity GUI using hafez
+antigravity                 # Antigravity GUI using hafez
 ```
 
 If the GUI is already running after switching profiles, open a fresh
@@ -139,17 +152,25 @@ profile-isolated window with:
 agent-profile restart antigravity
 ```
 
-This adds `--new-window` automatically and leaves other Antigravity windows
-running, avoiding forced process termination or loss of unsaved work. When the
-GUI is auto-detected from a macOS app bundle, the adapter also uses `open -n`
-so the new profile cannot attach to an already-running Antigravity instance.
-You can pass additional GUI arguments after the provider name.
+This leaves other Antigravity windows running, avoiding forced process
+termination or loss of unsaved work: the profile's own `HOME` plus its own
+user-data-dir are what let the new window open alongside the running one, and
+`open -n` keeps it from attaching to the existing instance. `--new-window` is
+injected only in PATH-command mode -- any launcher resolved from `PATH` or
+from `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND`, a VS Code derived
+`antigravity-ide` being the case it exists for -- and never for the macOS app
+bundle, which is a plain Electron app and ignores that VS Code flag. You can
+pass additional GUI arguments after the provider name.
 
 `agent-profile copy antigravity default hafez` copies an existing managed
 default instead of live data. Copy refuses to overwrite an existing profile
 unless `--force` is supplied. Filesystem-backed data is copied; OS keyring
 credentials are intentionally not read or modified, so keyring-backed
-accounts may remain shared between profiles.
+accounts may remain shared between profiles. Snapshots also drop Chromium's
+`SingletonLock`, `SingletonCookie`, and `SingletonSocket` from
+`<profile>/gui-user-data` -- a copied lock still names the instance it came
+from, which could otherwise make the new profile silently focus the original
+window instead of opening its own.
 
 Codex profiles are launched with `CODEX_HOME=<profile-path>` and include the
 current `$CODEX_HOME` (or `~/.codex`) when copied.

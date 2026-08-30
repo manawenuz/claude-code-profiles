@@ -144,6 +144,21 @@ function _ap_fish_copy_tree
     command cp -R "$source/." "$destination/"
 end
 
+# Chromium's singleton files are symlinks naming the host and pid that owned the
+# source instance (SingletonLock -> <host>-<pid>) plus a socket under that
+# instance's temp dir. Copied into a new profile they can make Antigravity decide
+# another instance already owns this user-data-dir and simply focus that window,
+# which looks exactly like the profile failing to switch. They are pure runtime
+# state, so drop them from every snapshot.
+function _ap_fish_prune_gui_locks
+    set -l target $argv[1]
+    if not test -d "$target"
+        return 0
+    end
+    command rm -f (_ap_fish_join "$target" SingletonLock) (_ap_fish_join "$target" SingletonCookie) (_ap_fish_join "$target" SingletonSocket) 2>/dev/null
+    return 0
+end
+
 function _ap_fish_snapshot_live
     set -l provider $argv[1]
     set -l destination $argv[2]
@@ -218,6 +233,7 @@ function _ap_fish_copy_profile
         command rm -rf "$temporary"
         return 1
     end
+    _ap_fish_prune_gui_locks (_ap_fish_join "$temporary" gui-user-data)
     if test -e "$destination"; or test -L "$destination"
         command rm -rf "$destination"
         or begin
@@ -327,46 +343,101 @@ function _ap_fish_gui_command
     set -l gui_launcher (_ap_fish_gui_launcher)
     or return $status
     if string match -q -- 'app:*' "$gui_launcher"
-        string replace 'app:' '' "$gui_launcher" | string append /Contents/MacOS/Antigravity
+        printf '%s/Contents/MacOS/Antigravity\n' (string replace 'app:' '' "$gui_launcher")
     else
         printf '%s\n' "$gui_launcher"
     end
+end
+
+# open(1) has supported --env for many releases, but fall back gracefully if this
+# macOS predates it. An unrecognized option makes open print its usage and exit
+# without launching anything, so probing this way has no side effects.
+function _ap_fish_open_supports_env
+    /usr/bin/open --ap-probe-unsupported-option 2>&1 | string match -q -- '*--env*'
+end
+
+# Launches the GUI with the selected profile's HOME in its environment.
+#
+# HOME is the knob that actually switches profiles: Antigravity resolves its real
+# state (account, conversations, agent data) from os.homedir()/.gemini, so a run
+# that only overrides --user-data-dir keeps loading the original profile.
+# --user-data-dir is still passed because it moves Chromium's own user data --
+# most importantly the singleton lock -- which is what lets two profiles run at
+# the same time.
+#
+# On macOS the bundle goes through open(1) rather than exec'ing Contents/MacOS
+# directly: --env carries HOME in, -n forces a separate instance, and
+# LaunchServices reparents the app to launchd so it survives the shell and keeps
+# normal Dock and activation behaviour.
+function _ap_fish_launch_gui_run
+    set -l launch_mode $argv[1]
+    set -l launch_target $argv[2]
+    set -l launch_home $argv[3]
+    set -l launch_args $argv[4..-1]
+    if test "$launch_mode" != app
+        if set -q MSYSTEM[1]; and test -n "$MSYSTEM"
+            env HOME="$launch_home" USERPROFILE="$launch_home" $launch_target $launch_args
+        else
+            env HOME="$launch_home" $launch_target $launch_args
+        end
+        return $status
+    end
+    if _ap_fish_open_supports_env
+        command /usr/bin/open -n --env HOME="$launch_home" -a "$launch_target" --args $launch_args
+        return $status
+    end
+    set -l gui_bin (_ap_fish_macos_gui_command)
+    or return 127
+    # Without --env the binary has to be run directly; background and disown it so
+    # it outlives this shell instead of being killed when the shell exits.
+    env HOME="$launch_home" $gui_bin $launch_args >/dev/null 2>&1 &
+    disown
+    return 0
 end
 
 function _ap_fish_launch_gui
     set -l gui_launcher (_ap_fish_gui_launcher)
     or return $status
     set -l launch_mode command
-    set -l launch_command "$gui_launcher"
-    set -l launch_app
+    set -l launch_target "$gui_launcher"
     if string match -q -- 'app:*' "$gui_launcher"
         set launch_mode app
-        set launch_app (string replace 'app:' '' "$gui_launcher")
+        set launch_target (string replace 'app:' '' "$gui_launcher")
     end
     set -l launch_args $argv
     set -l profile (_ap_fish_selected_profile antigravity 2>/dev/null)
     if test $status -ne 0
         if test "$launch_mode" = app
-            command /usr/bin/open -n -a "$launch_app" --args $launch_args
+            command /usr/bin/open -n -a "$launch_target" --args $launch_args
         else
-            command $launch_command $launch_args
+            command $launch_target $launch_args
         end
         return $status
     end
+    mkdir -p (_ap_fish_join "$profile" home) (_ap_fish_join "$profile" gui-user-data) 2>/dev/null
+    set -l launch_home (_ap_fish_native_path (_ap_fish_join "$profile" home))
     if not _ap_fish_has_data_arg $launch_args
-        set launch_args --user-data-dir (_ap_fish_native_path (_ap_fish_join "$profile" gui-user-data)) $launch_args
+        # The "=" form is required: the app bundle is a plain Electron app whose
+        # Chromium parser only understands --switch=value and silently ignores the
+        # space-separated spelling. A VS Code derived antigravity-ide accepts it too.
+        set -l gui_data (_ap_fish_native_path (_ap_fish_join "$profile" gui-user-data))
+        set launch_args "--user-data-dir=$gui_data" $launch_args
     end
-    if test "$launch_mode" = app
-        command /usr/bin/open -n -a "$launch_app" --args $launch_args
-    else
-        command $launch_command $launch_args
-    end
+    _ap_fish_launch_gui_run "$launch_mode" "$launch_target" "$launch_home" $launch_args
 end
 
+# The app bundle takes no --new-window -- that is a VS Code flag and is inert
+# here; a separate HOME plus a separate user-data-dir is what lets another
+# profile open alongside the running one. Keep injecting it for a VS Code derived
+# antigravity-ide on PATH, where it is the real new-window mechanism.
 function _ap_fish_restart_gui
     set -l launch_args $argv
-    if not _ap_fish_has_new_window_arg $launch_args
-        set launch_args --new-window $launch_args
+    set -l gui_launcher (_ap_fish_gui_launcher)
+    or return $status
+    if not string match -q -- 'app:*' "$gui_launcher"
+        if not _ap_fish_has_new_window_arg $launch_args
+            set launch_args --new-window $launch_args
+        end
     end
     _ap_fish_launch_gui $launch_args
 end
@@ -557,12 +628,15 @@ function agent-profile
                 _ap_fish_die "usage: agent-profile which $provider [name]"
                 return 1
             end
+            # Declared out here on purpose: `set -l` inside an if/else block is
+            # scoped to that block, so assigning it there leaves $path empty below.
+            set -l path
             if test (count $command_args) -eq 1
                 _ap_fish_validate_name $command_args[1] >/dev/null
                 or return 1
-                set -l path (_ap_fish_profile_dir $provider $command_args[1])
+                set path (_ap_fish_profile_dir $provider $command_args[1])
             else
-                set -l path (_ap_fish_selected_profile $provider)
+                set path (_ap_fish_selected_profile $provider)
                 or begin
                     _ap_fish_die "no active or default profile set for $provider"
                     return 1

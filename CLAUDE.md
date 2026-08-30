@@ -52,8 +52,10 @@ Provider aliases `agy`, `antigravity`, `antigravity-cli`, `antigravity-gui`,
 and `antigravity-ide` normalize to the shared `antigravity` namespace; `codex`
 uses its own namespace. Target wrappers launch `agy`, Antigravity GUI, and
 Codex with the selected profile without changing the caller's environment.
-`agent-profile restart antigravity` opens a fresh GUI window with
-`--new-window` and the selected profile, without terminating existing windows.
+`agent-profile restart antigravity` opens a fresh GUI window for the selected
+profile without terminating existing windows; `--new-window` is injected only
+in PATH-command mode (a VS Code derived `antigravity-ide`), never for the
+macOS app bundle, which ignores it.
 
 ## Directory-Local Profiles
 
@@ -98,12 +100,27 @@ Profile names must match `[A-Za-z0-9_-]+`. Reject: empty, starts with `.`, conta
 
 Agent profile data lives at `${AGENT_PROFILE_DATA_DIR}` when set, otherwise
 `$XDG_DATA_HOME/agent-profiles/` (default `~/.local/share/agent-profiles/`) or
-`%LOCALAPPDATA%\agent-profiles\` on Windows. Antigravity CLI uses a child
-`HOME` rooted at `<profile>/home`; the GUI uses
-`--user-data-dir <profile>/gui-user-data`; Codex uses
-`CODEX_HOME=<profile>`. The `copy` command snapshots live data or copies a
-managed source through a temporary sibling and refuses accidental overwrites
-without `--force`.
+`%LOCALAPPDATA%\agent-profiles\` on Windows. Antigravity CLI **and** GUI use a
+child `HOME` rooted at `<profile>/home`: Antigravity resolves its account,
+credentials, conversations, and agent state from `os.homedir()/.gemini`, so
+`HOME` is the only knob that switches profiles (Node reads `USERPROFILE` for
+`os.homedir()` on Windows, so both variables are set there). The GUI is
+additionally passed `--user-data-dir=<profile>/gui-user-data` — always in the
+equals form, because the bundle is a plain Electron app whose Chromium parser
+silently ignores the space-separated spelling — which moves Chromium's user
+data and singleton lock and is what lets two profiles run concurrently. On
+macOS the bundle is launched through `open -n --env HOME=… -a <bundle> --args
+--user-data-dir=…` so it gets the profile's `HOME`, runs as a separate
+instance, and stays detached from the shell with normal Dock behaviour;
+without `--env` support the adapter falls back to running the bundle binary
+directly. Codex uses `CODEX_HOME=<profile>`.
+
+The `copy` command snapshots live data or copies a managed source through a
+temporary sibling and refuses accidental overwrites without `--force`. Every
+snapshot drops Chromium's `SingletonLock`, `SingletonCookie`, and
+`SingletonSocket` from `gui-user-data`: a copied lock names the instance it
+came from and can make Antigravity focus that original window instead of
+starting the new profile.
 
 ## Checking Scripts
 

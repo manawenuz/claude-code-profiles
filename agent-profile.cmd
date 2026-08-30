@@ -258,6 +258,7 @@ if /i "%AP_PROVIDER%"=="codex" (
 goto :copy_finalize
 
 :copy_finalize
+call :prune_gui_locks "%AP_TMP%\gui-user-data"
 if exist "%AP_DEST%\" rmdir /s /q "%AP_DEST%" >nul 2>&1
 move /Y "%AP_TMP%" "%AP_DEST%" >nul 2>&1
 if errorlevel 1 goto :copy_failed
@@ -274,6 +275,19 @@ exit /b 1
 :copy_usage
 echo agent-profile: usage: agent-profile copy %AP_PROVIDER% [source] ^<name^> [--force] >&2
 exit /b 1
+
+:: Chromium's singleton files name the host and pid that owned the source
+:: instance (SingletonLock points at "host-pid") plus a socket under that
+:: instance's temp dir. Copied into a new profile they can make Antigravity
+:: decide another instance already owns this user-data-dir and simply focus
+:: that window, which looks exactly like the profile failing to switch. They
+:: are pure runtime state, so drop them from every snapshot.
+:prune_gui_locks
+if not exist "%~1\" exit /b 0
+del /f /q "%~1\SingletonLock" >nul 2>&1
+del /f /q "%~1\SingletonCookie" >nul 2>&1
+del /f /q "%~1\SingletonSocket" >nul 2>&1
+exit /b 0
 
 :list
 if not "%~3"=="" (
@@ -375,6 +389,11 @@ if /i not "%AP_PROVIDER%"=="antigravity" (
     echo agent-profile: restart is only supported for antigravity >&2
     exit /b 1
 )
+:: --new-window is a VS Code flag and is inert for a plain Electron build, but
+:: on Windows the GUI is always reached as a PATH executable -- there is no
+:: macOS app-bundle mode here -- so it is injected unless the user already
+:: passed it. What actually lets a second profile open alongside a running one
+:: is the separate HOME plus the separate user-data-dir antigravity.cmd sets.
 set "AP_NEW_WINDOW=--new-window"
 for %%A in (%3 %4 %5 %6 %7 %8 %9) do if /i "%%~A"=="--new-window" set "AP_NEW_WINDOW="
 if defined AP_NEW_WINDOW (

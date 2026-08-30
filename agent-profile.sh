@@ -130,6 +130,18 @@ _ap_copy_tree() {
     cp -R "$_ap_copy_source"/. "$_ap_copy_destination"/ 2>/dev/null
 }
 
+# Chromium's singleton files are symlinks naming the host and pid that owned the
+# source instance (SingletonLock -> <host>-<pid>) plus a socket under the source
+# instance's temp dir. Copied into a new profile they can make Antigravity decide
+# another instance already owns this user-data-dir and simply focus that window,
+# which looks exactly like the profile failing to switch. They are pure runtime
+# state, so drop them from every snapshot.
+_ap_prune_gui_locks() {
+    [ -d "$1" ] || return 0
+    rm -f "$1/SingletonLock" "$1/SingletonCookie" "$1/SingletonSocket" 2>/dev/null
+    return 0
+}
+
 _ap_snapshot_live() {
     _ap_snapshot_provider="$1"
     _ap_snapshot_destination="$2"
@@ -198,6 +210,7 @@ _ap_copy_profile() {
         rm -rf "$_ap_copy_tmp"
         return 1
     fi
+    _ap_prune_gui_locks "$_ap_copy_tmp/gui-user-data"
     if [ -e "$_ap_copy_final_destination" ] || [ -L "$_ap_copy_final_destination" ]; then
         rm -rf "$_ap_copy_final_destination" || {
             _ap_die "could not replace profile '$_ap_copy_name'"
@@ -366,6 +379,46 @@ _ap_launch_cli() {
     fi
 }
 
+# open(1) has supported --env for many releases, but fall back gracefully if this
+# macOS predates it. An unrecognized option makes open print its usage and exit
+# without launching anything, so probing this way has no side effects.
+_ap_open_supports_env() {
+    /usr/bin/open --ap-probe-unsupported-option 2>&1 | grep -q -- '--env'
+}
+
+# Launches the GUI with the selected profile's HOME in its environment.
+#
+# HOME is the knob that actually switches profiles: Antigravity resolves its real
+# state (account, conversations, agent data) from os.homedir()/.gemini, so a run
+# that only overrides --user-data-dir keeps loading the original profile.
+# --user-data-dir is still passed because it moves Chromium's own user data --
+# most importantly the singleton lock -- which is what lets two profiles run at
+# the same time.
+#
+# On macOS the bundle goes through open(1) rather than exec'ing Contents/MacOS
+# directly: --env carries HOME in, -n forces a separate instance, and
+# LaunchServices reparents the app to launchd so it survives the shell and keeps
+# normal Dock and activation behaviour.
+_ap_launch_gui_run() {
+    if [ "$_ap_gui_mode" != app ]; then
+        if _ap_is_msys; then
+            env HOME="$_ap_gui_home" USERPROFILE="$_ap_gui_home" "$_ap_gui_command" "$@"
+        else
+            env HOME="$_ap_gui_home" "$_ap_gui_command" "$@"
+        fi
+        return $?
+    fi
+    if _ap_open_supports_env; then
+        command /usr/bin/open -n --env HOME="$_ap_gui_home" -a "$_ap_gui_app" --args "$@"
+        return $?
+    fi
+    _ap_gui_bin=$(_ap_macos_gui_command) || return 127
+    # Without --env the binary has to be exec'd directly. The subshell backgrounds
+    # and orphans it so it outlives the shell without joining the job table, which
+    # zsh would otherwise SIGHUP on exit.
+    ( env HOME="$_ap_gui_home" "$_ap_gui_bin" "$@" >/dev/null 2>&1 </dev/null & )
+}
+
 _ap_launch_gui() {
     _ap_gui_launcher=$(_ap_find_gui_command)
     if [ -z "$_ap_gui_launcher" ]; then
@@ -390,28 +443,37 @@ _ap_launch_gui() {
         fi
         return $?
     fi
+    mkdir -p "$_ap_selected_dir/home" "$_ap_selected_dir/gui-user-data" 2>/dev/null
+    _ap_gui_home=$(_ap_native_path "$_ap_selected_dir/home")
     _ap_gui_data_dir=$(_ap_native_path "$_ap_selected_dir/gui-user-data")
     if _ap_has_gui_data_arg "$@"; then
-        if [ "$_ap_gui_mode" = app ]; then
-            command /usr/bin/open -n -a "$_ap_gui_app" --args "$@"
-        else
-            command "$_ap_gui_command" "$@"
-        fi
+        _ap_launch_gui_run "$@"
     else
-        if [ "$_ap_gui_mode" = app ]; then
-            command /usr/bin/open -n -a "$_ap_gui_app" --args --user-data-dir "$_ap_gui_data_dir" "$@"
-        else
-            command "$_ap_gui_command" --user-data-dir "$_ap_gui_data_dir" "$@"
-        fi
+        # The "=" form is required: the app bundle is a plain Electron app whose
+        # Chromium parser only understands --switch=value and silently ignores the
+        # space-separated spelling. A VS Code derived antigravity-ide accepts it too.
+        _ap_launch_gui_run --user-data-dir="$_ap_gui_data_dir" "$@"
     fi
 }
 
+# The app bundle takes no --new-window -- that is a VS Code flag and is inert
+# here; a separate HOME plus a separate user-data-dir is what lets another
+# profile open alongside the running one. Keep injecting it for a VS Code derived
+# antigravity-ide on PATH, where it is the real new-window mechanism.
 _ap_restart_gui() {
-    if _ap_has_new_window_arg "$@"; then
-        _ap_launch_gui "$@"
-    else
-        _ap_launch_gui --new-window "$@"
-    fi
+    _ap_restart_launcher=$(_ap_find_gui_command)
+    case "$_ap_restart_launcher" in
+        app:*)
+            _ap_launch_gui "$@"
+            ;;
+        *)
+            if _ap_has_new_window_arg "$@"; then
+                _ap_launch_gui "$@"
+            else
+                _ap_launch_gui --new-window "$@"
+            fi
+            ;;
+    esac
 }
 
 _ap_help() {

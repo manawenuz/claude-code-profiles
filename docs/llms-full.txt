@@ -70,7 +70,7 @@ Examples:
 agent-profile copy antigravity hafez
 agent-profile default antigravity hafez
 agy
-antigravity --new-window
+antigravity
 agent-profile restart antigravity
 agent-profile copy antigravity default backup
 agent-profile copy codex work
@@ -79,16 +79,33 @@ codex
 ```
 
 Antigravity live copies include `$HOME/.gemini` and the detected GUI user data
-directory. The CLI runs with a profile-specific child `HOME`; the GUI receives
-`--user-data-dir <profile>/gui-user-data`. On macOS, the GUI adapter also
-auto-detects `/Applications/Antigravity.app` and
-`~/Applications/Antigravity.app` when no `antigravity` command is on `PATH` and
-starts the bundle as a new app instance so a selected profile cannot attach to
-an existing Antigravity process. Codex runs with
+directory. The CLI and the GUI both run with a profile-specific child `HOME`
+rooted at `<profile>/home`: Antigravity resolves its account, conversations,
+and agent state from `~/.gemini`, so `HOME` is the setting that actually
+switches profiles. On Windows the app reads `USERPROFILE` instead, so both
+launchers set that alongside `HOME`. The GUI additionally receives
+`--user-data-dir=<profile>/gui-user-data` in the equals form, which moves
+Chromium's user data and its singleton lock and so lets two profiles run at
+the same time; on its own it does not switch the profile. On
+macOS, the GUI adapter also auto-detects `/Applications/Antigravity.app` and
+`~/Applications/Antigravity.app` when no `antigravity` command is on `PATH`,
+launching the bundle with
+`open -n --env HOME=... -a <bundle> --args --user-data-dir=...` so it gets the
+profile's `HOME`, starts as a separate instance rather than attaching to an
+existing Antigravity process, and stays detached from the shell with normal
+Dock and activation behaviour. Codex runs with
 `CODEX_HOME=<profile>`. Copy refuses an existing destination unless
-`--force` is provided, and OS keyring credentials are not copied or altered.
-`agent-profile restart antigravity` opens a fresh GUI window with
-`--new-window` and the selected profile without terminating other windows.
+`--force` is provided, OS keyring credentials are not copied or altered, and
+snapshots drop Chromium's `SingletonLock`, `SingletonCookie`, and
+`SingletonSocket` files, which would otherwise let a new profile silently
+focus the original window.
+`agent-profile restart antigravity` opens a fresh GUI window for the selected
+profile without terminating other windows; a distinct `HOME` plus a distinct
+user-data-dir is what opens it alongside a running one. `--new-window` is
+injected only in PATH-command mode — any launcher resolved from `PATH` or from
+`AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND`, a VS Code derived `antigravity-ide`
+being the case it exists for — and never for the macOS app bundle, which
+ignores it.
 
 ## How It Works
 

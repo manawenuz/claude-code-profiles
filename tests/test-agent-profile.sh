@@ -57,6 +57,31 @@ assert_contains() {
     grep -F -- "$_assert_contains_text" "$_assert_contains_file" >/dev/null 2>&1
 }
 
+# The app-bundle fallback launch detaches the GUI, so its log is not there the
+# moment the wrapper returns. Poll for it instead of racing it.
+wait_for_log() {
+    _wait_log_file=$1
+    _wait_log_text=$2
+    _wait_log_limit=${3:-100}
+    _wait_log_tries=0
+    while [ "$_wait_log_tries" -lt "$_wait_log_limit" ]; do
+        if [ -f "$_wait_log_file" ] && assert_contains "$_wait_log_file" "$_wait_log_text"; then
+            return 0
+        fi
+        sleep 0.05
+        _wait_log_tries=$((_wait_log_tries + 1))
+    done
+    return 1
+}
+
+# The GUI stub records the argv it received and the HOME it inherited, mirroring
+# the agy stub. HOME is the knob that actually selects the Antigravity account
+# (it resolves ~/.gemini), so the launch tests have to see it, not just the flags.
+write_gui_stub() {
+    printf '#!/bin/sh\nprintf "GUI_ARGS=%%s\\n" "$*" > "$AGENT_PROFILE_TEST_LOG"\nenv | grep "^HOME=" >> "$AGENT_PROFILE_TEST_LOG"\n' > "$TEST_ROOT/bin/antigravity"
+    chmod +x "$TEST_ROOT/bin/antigravity"
+}
+
 test_invalid_name_rejected() {
     if agent-profile create antigravity '../escape' >/dev/null 2>&1; then
         return 1
@@ -74,6 +99,26 @@ test_copy_live_antigravity() {
     agent-profile copy antigravity hafez >/dev/null 2>&1 || return 1
     assert_file "$XDG_DATA_HOME/agent-profiles/antigravity/hafez/home/.gemini/antigravity-cli/antigravity-oauth-token" 'oauth-token' || return 1
     assert_file "$XDG_DATA_HOME/agent-profiles/antigravity/hafez/gui-user-data/User/settings.json" 'gui-settings'
+}
+
+# Chromium's singleton symlinks name the host and pid of the instance that owned
+# the source directory. Copied into a profile they make Antigravity focus the
+# original window instead of opening the new profile, so a snapshot must drop them.
+test_copy_prunes_gui_singleton_locks() {
+    ln -s 'MacBook-Pro.local-77770' "$TEST_ROOT/gui-source/SingletonLock" || return 1
+    ln -s '17350445988078770481' "$TEST_ROOT/gui-source/SingletonCookie" || return 1
+    ln -s "$TEST_ROOT/missing-scoped-dir/SingletonSocket" "$TEST_ROOT/gui-source/SingletonSocket" || return 1
+
+    agent-profile copy antigravity locked >/dev/null 2>&1 || return 1
+    _copy_locks_dir="$XDG_DATA_HOME/agent-profiles/antigravity/locked/gui-user-data"
+    assert_file "$_copy_locks_dir/User/settings.json" 'gui-settings' || return 1
+    for _copy_locks_name in SingletonLock SingletonCookie SingletonSocket; do
+        if [ -e "$_copy_locks_dir/$_copy_locks_name" ] || [ -L "$_copy_locks_dir/$_copy_locks_name" ]; then
+            printf 'expected %s to be pruned from the snapshot\n' "$_copy_locks_dir/$_copy_locks_name" >&2
+            return 1
+        fi
+    done
+    return 0
 }
 
 test_copy_from_default_and_no_overwrite() {
@@ -120,6 +165,125 @@ test_gui_macos_app_bundle_uses_new_instance_launcher() {
     [ "$_ap_gui_launcher" = app:/Applications/Antigravity.app ]
 }
 
+# The macOS app bundle is the configuration the profile-switch bug was reported
+# in, and it shares no launch code with the PATH-command tests below: the bundle
+# is started through open(1) -- or, where open(1) has no --env, the bundle binary
+# itself -- instead of a command on PATH. Both helpers that decide this are
+# ordinary sourced functions, so the test points the bundle locator at a fake
+# bundle and forces the no---env fallback, which turns the launch into a plain
+# exec of a stub that records its argv and its HOME.
+test_gui_macos_app_bundle_launch_isolates_home() {
+    _app_bundle="$TEST_ROOT/Fake-Antigravity.app"
+    mkdir -p "$_app_bundle/Contents/MacOS" || return 1
+    printf '#!/bin/sh\nprintf "GUI_ARGS=%%s\\n" "$*" > "$AGENT_PROFILE_TEST_LOG"\nenv | grep "^HOME=" >> "$AGENT_PROFILE_TEST_LOG"\n' > "$_app_bundle/Contents/MacOS/Antigravity"
+    chmod +x "$_app_bundle/Contents/MacOS/Antigravity" || return 1
+
+    _ap_macos_gui_app() { printf '%s\n' "$TEST_ROOT/Fake-Antigravity.app"; }
+    # open(1) --env is what carries HOME into the bundle; forcing the fallback
+    # branch makes the launch a direct exec this test can observe instead.
+    _ap_open_supports_env() { return 1; }
+
+    agent-profile create antigravity appmode >/dev/null 2>&1 || return 1
+    agent-profile use antigravity appmode >/dev/null 2>&1 || return 1
+    unset AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    _app_saved_path=$PATH
+    _app_saved_log=${AGENT_PROFILE_TEST_LOG-}
+    _app_log="$TEST_ROOT/gui-app.log"
+    AGENT_PROFILE_TEST_LOG="$_app_log"
+    # Nothing named antigravity may be on PATH, or the resolver takes the command
+    # branch and the app-bundle contract goes untested.
+    PATH=/usr/bin:/bin
+    agent-profile restart antigravity >/dev/null 2>&1
+    _app_restart_status=$?
+    PATH=$_app_saved_path
+    AGENT_PROFILE_TEST_LOG=$_app_saved_log
+    # Hand the session back to the profile the PATH-mode tests below assert on.
+    agent-profile use antigravity copied >/dev/null 2>&1 || return 1
+    [ "$_app_restart_status" -eq 0 ] || return 1
+
+    _app_home="$XDG_DATA_HOME/agent-profiles/antigravity/appmode/home"
+    _app_data="$XDG_DATA_HOME/agent-profiles/antigravity/appmode/gui-user-data"
+    if ! wait_for_log "$_app_log" "HOME=$_app_home"; then
+        printf 'timed out waiting for the backgrounded app-bundle launch to write %s\n' "$_app_log" >&2
+        return 1
+    fi
+    # HOME is what actually selects the Antigravity account, and the "=" spelling
+    # is mandatory: the bundle is a plain Electron app whose Chromium parser
+    # silently ignores the space-separated form.
+    assert_contains "$_app_log" "GUI_ARGS=--user-data-dir=$_app_data" || return 1
+    # --new-window is a VS Code flag and inert for the Electron bundle, so the
+    # app-bundle restart must not inject it.
+    if assert_contains "$_app_log" '--new-window'; then
+        printf 'expected no --new-window in the app-bundle launch\n' >&2
+        return 1
+    fi
+    # The launch also has to create both directories it points the GUI at.
+    [ -d "$_app_home" ] || return 1
+    [ -d "$_app_data" ]
+}
+
+# The test above forces the fallback branch, so it never reaches the line that
+# actually runs on a current macOS. This one lets the real open(1) launch a
+# hand-built bundle, putting `open -n --env HOME=...` itself under test.
+test_gui_macos_app_bundle_open_env_launch() {
+    [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+    # Where open(1) predates --env the adapter takes the fallback the test above
+    # already covers, so there is nothing here to assert.
+    /usr/bin/open --ap-probe-unsupported-option 2>&1 | grep -q -- '--env' || return 0
+
+    _oe_bundle="$TEST_ROOT/OpenEnv-Antigravity.app"
+    _oe_log="$TEST_ROOT/gui-open-env.log"
+    rm -f "$_oe_log"
+    mkdir -p "$_oe_bundle/Contents/MacOS" || return 1
+    # LaunchServices needs a real Info.plist to launch the bundle at all, and
+    # LSBackgroundOnly keeps the probe out of the Dock and away from focus.
+    cat > "$_oe_bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Antigravity</string>
+<key>CFBundleIdentifier</key><string>local.agentprofile.openenvprobe</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSBackgroundOnly</key><true/>
+</dict></plist>
+PLIST
+    # open(1) hands the app only the environment it is told to, so the log path
+    # is baked into the stub rather than read from AGENT_PROFILE_TEST_LOG.
+    printf '#!/bin/sh\nprintf "GUI_ARGS=%%s\\n" "$*" > "%s"\nenv | grep "^HOME=" >> "%s"\n' "$_oe_log" "$_oe_log" > "$_oe_bundle/Contents/MacOS/Antigravity"
+    chmod +x "$_oe_bundle/Contents/MacOS/Antigravity" || return 1
+
+    _ap_macos_gui_app() { printf '%s\n' "$TEST_ROOT/OpenEnv-Antigravity.app"; }
+    # The fallback test above pinned this to failure, and these are plain sourced
+    # functions, so restore the real probe or open(1) is never reached at all.
+    _ap_open_supports_env() { /usr/bin/open --ap-probe-unsupported-option 2>&1 | grep -q -- '--env'; }
+
+    agent-profile create antigravity openenv >/dev/null 2>&1 || return 1
+    agent-profile use antigravity openenv >/dev/null 2>&1 || return 1
+    unset AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    _oe_saved_path=$PATH
+    PATH=/usr/bin:/bin
+    agent-profile restart antigravity >/dev/null 2>&1
+    _oe_status=$?
+    PATH=$_oe_saved_path
+    # Hand the session back to the profile the PATH-mode tests below assert on.
+    agent-profile use antigravity copied >/dev/null 2>&1 || return 1
+    [ "$_oe_status" -eq 0 ] || return 1
+
+    _oe_home="$XDG_DATA_HOME/agent-profiles/antigravity/openenv/home"
+    _oe_data="$XDG_DATA_HOME/agent-profiles/antigravity/openenv/gui-user-data"
+    # LaunchServices starts the app asynchronously, and a bundle it has never
+    # seen takes longer than a detached exec, so allow more room than usual.
+    if ! wait_for_log "$_oe_log" "HOME=$_oe_home" 300; then
+        printf 'timed out waiting for the open(1) app-bundle launch to write %s\n' "$_oe_log" >&2
+        return 1
+    fi
+    assert_contains "$_oe_log" "GUI_ARGS=--user-data-dir=$_oe_data" || return 1
+    if assert_contains "$_oe_log" '--new-window'; then
+        printf 'expected no --new-window in the open(1) app-bundle launch\n' >&2
+        return 1
+    fi
+    return 0
+}
+
 test_codex_wrapper_sets_codex_home() {
     mkdir -p "$HOME/.codex"
     printf 'model = "gpt-test"\n' > "$HOME/.codex/config.toml"
@@ -133,21 +297,33 @@ test_codex_wrapper_sets_codex_home() {
 }
 
 test_gui_wrapper_injects_user_data_dir() {
-    printf '#!/bin/sh\nprintf "GUI_ARGS=%%s\\n" "$*" > "$AGENT_PROFILE_TEST_LOG"\n' > "$TEST_ROOT/bin/antigravity"
-    chmod +x "$TEST_ROOT/bin/antigravity"
+    write_gui_stub
     AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND=antigravity
     export AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
     antigravity --new-window >/dev/null 2>&1 || return 1
-    assert_contains "$AGENT_PROFILE_TEST_LOG" "--user-data-dir $XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data" || return 1
+    # The "=" spelling is mandatory: Chromium's parser silently ignores the
+    # space-separated form, which is how the profile switch used to be a no-op.
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "GUI_ARGS=--user-data-dir=$XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data --new-window" || return 1
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "HOME=$XDG_DATA_HOME/agent-profiles/antigravity/copied/home" || return 1
+    # The launch also has to create both directories it points the GUI at.
+    [ -d "$XDG_DATA_HOME/agent-profiles/antigravity/copied/home" ] || return 1
+    [ -d "$XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data" ] || return 1
 
+    # An explicit --user-data-dir wins: no flag is injected, but HOME still is.
     antigravity --user-data-dir /tmp/custom-gui >/dev/null 2>&1 || return 1
-    assert_contains "$AGENT_PROFILE_TEST_LOG" 'GUI_ARGS=--user-data-dir /tmp/custom-gui'
+    assert_contains "$AGENT_PROFILE_TEST_LOG" 'GUI_ARGS=--user-data-dir /tmp/custom-gui' || return 1
+    if assert_contains "$AGENT_PROFILE_TEST_LOG" '--user-data-dir='; then
+        printf 'expected no injected --user-data-dir when the user supplied one\n' >&2
+        return 1
+    fi
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "HOME=$XDG_DATA_HOME/agent-profiles/antigravity/copied/home"
 }
 
 test_gui_restart_opens_fresh_profile_window() {
     agent-profile restart antigravity >/dev/null 2>&1 || return 1
-    assert_contains "$AGENT_PROFILE_TEST_LOG" "--user-data-dir $XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data" || return 1
-    assert_contains "$AGENT_PROFILE_TEST_LOG" '--new-window'
+    # --new-window is a VS Code flag, so it is only injected in PATH-command mode.
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "GUI_ARGS=--user-data-dir=$XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data --new-window" || return 1
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "HOME=$XDG_DATA_HOME/agent-profiles/antigravity/copied/home"
 }
 
 run_test() {
@@ -161,10 +337,15 @@ run_test() {
 
 run_test test_invalid_name_rejected
 run_test test_copy_live_antigravity
+run_test test_copy_prunes_gui_singleton_locks
 run_test test_copy_from_default_and_no_overwrite
 run_test test_agy_wrapper_isolates_home
+# The app-bundle discovery tests must stay ahead of every test that installs a
+# bin/antigravity stub, or the resolver returns the stub instead of the bundle.
 run_test test_gui_macos_app_bundle_discovery
 run_test test_gui_macos_app_bundle_uses_new_instance_launcher
+run_test test_gui_macos_app_bundle_launch_isolates_home
+run_test test_gui_macos_app_bundle_open_env_launch
 run_test test_codex_wrapper_sets_codex_home
 run_test test_gui_wrapper_injects_user_data_dir
 run_test test_gui_restart_opens_fresh_profile_window
