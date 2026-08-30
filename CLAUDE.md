@@ -115,12 +115,26 @@ instance, and stays detached from the shell with normal Dock behaviour;
 without `--env` support the adapter falls back to running the bundle binary
 directly. Codex uses `CODEX_HOME=<profile>`.
 
+Redirecting `HOME` costs the child its keychain on macOS: the login keychain
+is resolved at `$HOME/Library/Keychains`, so a profile `HOME` has none and
+Chromium cannot store its "Antigravity Safe Storage" key — the app stops on
+"A keychain cannot be found to store antigravity". Both launch paths therefore
+symlink `<profile>/home/Library/Keychains` to the caller's real keychain
+directory right after creating the profile home, on Darwin only, only when the
+real directory exists, never over an existing entry (an existing symlink,
+dangling included, counts), and never failing the launch. That key only
+encrypts the local cookie store at rest; the account lives in `~/.gemini` and
+stays per-profile, so the shared keychain costs no account isolation. Windows
+and Linux get no link and need none — DPAPI is bound to the user account and
+Chromium on Linux uses the D-Bus Secret Service.
+
 The `copy` command snapshots live data or copies a managed source through a
 temporary sibling and refuses accidental overwrites without `--force`. Every
 snapshot drops Chromium's `SingletonLock`, `SingletonCookie`, and
 `SingletonSocket` from `gui-user-data`: a copied lock names the instance it
 came from and can make Antigravity focus that original window instead of
-starting the new profile.
+starting the new profile. Profiles copied before that pruning existed can
+still carry the three files; deleting them from `gui-user-data` is the fix.
 
 ## Checking Scripts
 

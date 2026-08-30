@@ -94,11 +94,29 @@ launching the bundle with
 profile's `HOME`, starts as a separate instance rather than attaching to an
 existing Antigravity process, and stays detached from the shell with normal
 Dock and activation behaviour. Codex runs with
-`CODEX_HOME=<profile>`. Copy refuses an existing destination unless
-`--force` is provided, OS keyring credentials are not copied or altered, and
+`CODEX_HOME=<profile>`.
+
+A redirected `HOME` would also strand the app without a keychain on macOS,
+which resolves the login keychain at `$HOME/Library/Keychains`: Chromium then
+cannot store its "Antigravity Safe Storage" key and the app stops on "A
+keychain cannot be found to store antigravity". Both launchers therefore link
+`<profile>/home/Library/Keychains` to the real keychain directory before
+starting the CLI or the GUI, and never replace an entry that is already there.
+That shared key only encrypts the local cookie store at rest — the account
+itself lives in `~/.gemini` and remains per-profile — so account separation is
+unaffected. Windows and Linux get no link and need none, since DPAPI is bound
+to the Windows user account and Chromium on Linux uses the D-Bus Secret
+Service.
+
+Copy refuses an existing destination unless `--force` is provided, OS keyring
+credentials are not copied or altered — the keychain link is reproduced as a
+link rather than followed, so a copy never reads the keychains it reaches, and
+what Antigravity keeps there is the "Antigravity Safe Storage" key above, which
+holds no account identity — and
 snapshots drop Chromium's `SingletonLock`, `SingletonCookie`, and
 `SingletonSocket` files, which would otherwise let a new profile silently
-focus the original window.
+focus the original window; a profile copied before that pruning existed is
+fixed by deleting those three files from `<profile>/gui-user-data`.
 `agent-profile restart antigravity` opens a fresh GUI window for the selected
 profile without terminating other windows; a distinct `HOME` plus a distinct
 user-data-dir is what opens it alongside a running one. `--new-window` is

@@ -54,8 +54,17 @@ as a separate, detached app instance; `agent-profile restart antigravity` adds
 `--new-window` only in PATH-command mode -- any launcher resolved from `PATH`
 or from `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND`, such as a VS Code derived
 `antigravity-ide` -- never for the app bundle, which ignores that flag. Codex
-uses `CODEX_HOME`. Profile snapshots omit Chromium's `SingletonLock`,
-`SingletonCookie`, and `SingletonSocket` files. OS keyring credentials are not
+uses `CODEX_HOME`. Because macOS resolves the login keychain at
+`$HOME/Library/Keychains`, a redirected `HOME` would leave the child without
+one ("A keychain cannot be found to store antigravity"), so on macOS both
+launchers link `<profile>/home/Library/Keychains` to the real keychain
+directory, never clobbering an existing entry; that shares the whole keychain
+directory, where what Antigravity stores is Chromium's "Antigravity Safe
+Storage" key for the local cookie store, while the account stays per-profile
+in `~/.gemini`. Windows and Linux get no link.
+Profile snapshots omit Chromium's `SingletonLock`, `SingletonCookie`, and
+`SingletonSocket` files -- a profile copied before that pruning still holds
+them, and deleting the three files fixes it. OS keyring credentials are not
 copied.
 
 Fish is supported through native sourceable adapters. Source

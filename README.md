@@ -136,6 +136,20 @@ detached from your shell with normal Dock and activation behaviour. If the GUI
 executable is installed elsewhere, set
 `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND` to its executable path.
 
+A redirected `HOME` on macOS would also cost the app its keychain: macOS
+resolves the login keychain at `$HOME/Library/Keychains`, so a child with a
+profile-specific `HOME` has none at all, and Antigravity stops on a modal
+reading "A keychain cannot be found to store antigravity". Both launchers
+therefore link `<profile>/home/Library/Keychains` to your real keychain
+directory before starting the CLI or the GUI, and never replace an entry that
+is already there. The link points at the keychain directory, so every profile
+reaches the same keychains you already use; what Antigravity actually keeps
+there is Chromium's "Antigravity Safe Storage" key, which encrypts the local
+cookie store at rest. The account itself lives in `~/.gemini` and stays
+per-profile, so nothing about account separation is weakened. Windows and Linux need no link and get
+none -- DPAPI is bound to the Windows user account, and Chromium on Linux uses
+the D-Bus Secret Service.
+
 To copy the currently logged-in Antigravity data into `hafez`:
 
 ```sh
@@ -165,12 +179,16 @@ pass additional GUI arguments after the provider name.
 `agent-profile copy antigravity default hafez` copies an existing managed
 default instead of live data. Copy refuses to overwrite an existing profile
 unless `--force` is supplied. Filesystem-backed data is copied; OS keyring
-credentials are intentionally not read or modified, so keyring-backed
-accounts may remain shared between profiles. Snapshots also drop Chromium's
+credentials are intentionally not read or modified. On macOS the only keychain
+item in play is the shared "Antigravity Safe Storage" key described above,
+which carries no account identity; on other platforms a keyring-backed login
+may still be shared between profiles. Snapshots also drop Chromium's
 `SingletonLock`, `SingletonCookie`, and `SingletonSocket` from
 `<profile>/gui-user-data` -- a copied lock still names the instance it came
 from, which could otherwise make the new profile silently focus the original
-window instead of opening its own.
+window instead of opening its own. A profile snapshotted before that pruning
+existed can still hold those three files; deleting them from
+`<profile>/gui-user-data` fixes it.
 
 Codex profiles are launched with `CODEX_HOME=<profile-path>` and include the
 current `$CODEX_HOME` (or `~/.codex`) when copied.

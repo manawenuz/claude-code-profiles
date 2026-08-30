@@ -13,6 +13,49 @@ function Get-APHome {
     return $HOME
 }
 
+# $IsMacOS only exists in PowerShell 6+; Windows PowerShell 5.1 has no such
+# variable, so it is read through Get-Variable rather than referenced bare.
+# 5.1 is Windows-only anyway, which the Windows check settles before that read.
+function Test-APMacOS {
+    if (Test-APWindows) { return $false }
+    $macOS = Get-Variable -Name IsMacOS -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $macOS) { return $false }
+    return [bool]$macOS
+}
+
+# macOS resolves the default login keychain at $HOME/Library/Keychains, so a child
+# whose HOME points at a profile has no keychain at all and Chromium (inside
+# Antigravity) cannot store its "Antigravity Safe Storage" key -- the app then
+# stops on a "Keychain Not Found" modal. Link the real keychain directory into the
+# profile home so the child resolves the login keychain again. This costs no
+# account isolation: the Google account lives in ~/.gemini files, while the
+# keychain item is only Chromium's at-rest key for the local cookie store.
+#
+# macOS only. On Windows DPAPI is tied to the user account rather than HOME, and
+# on Linux Chromium reaches the Secret Service over D-Bus, which HOME does not
+# move -- neither platform gets this link.
+function Add-APMacOSKeychainLink {
+    param([string]$ProfileHome)
+    if (-not (Test-APMacOS)) { return }
+    try {
+        # Get-APHome is the caller's real home: this adapter never mutates $env:.
+        $realKeychains = Join-Path (Join-Path (Get-APHome) 'Library') 'Keychains'
+        if (-not (Test-Path -LiteralPath $realKeychains -PathType Container)) { return }
+        $libraryDir = Join-Path $ProfileHome 'Library'
+        $linkPath = Join-Path $libraryDir 'Keychains'
+        # Never disturb a real directory or an existing link the user put here --
+        # including a dangling one, which Test-Path -PathType Container reports as
+        # absent (it follows the link) while New-Item would still fail on it.
+        # Get-Item -Force reports the entry itself, so it catches every case.
+        if (Get-Item -LiteralPath $linkPath -Force -ErrorAction SilentlyContinue) { return }
+        New-Item -ItemType Directory -Path $libraryDir -Force -ErrorAction Stop | Out-Null
+        # Symlink creation needs no elevation on macOS.
+        New-Item -ItemType SymbolicLink -Path $linkPath -Target $realKeychains -ErrorAction Stop | Out-Null
+    } catch {
+        # Convenience only -- a failure here must never block a launch.
+    }
+}
+
 function Get-APDataDir {
     if ($env:AGENT_PROFILE_DATA_DIR) { return $env:AGENT_PROFILE_DATA_DIR }
     if ((Test-APWindows) -and $env:LOCALAPPDATA) { return (Join-Path $env:LOCALAPPDATA 'agent-profiles') }
@@ -125,17 +168,29 @@ function Copy-APTree {
     param([string]$Source, [string]$Destination)
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     foreach ($item in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
-        try {
-            Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
-        } catch {
-            # Copy-Item copies a link by value, so a link whose target no longer
-            # exists -- Chromium's SingletonLock names a host and pid rather than a
-            # real file -- would otherwise abort the entire profile copy. Those links
-            # are runtime state the snapshot drops anyway, so skip them and let any
-            # other failure surface.
-            if ($item.LinkType) { continue }
-            throw
+        # Copy-Item follows a link and copies what it points at, which cp -R does
+        # not do. Left alone that would walk the profile's Library/Keychains link
+        # and pull the real login keychain into the copy, and it throws outright on
+        # a link whose target is gone -- Chromium's SingletonLock names a host and
+        # pid rather than a real file. Reproduce the link itself instead, exactly
+        # like cp -R, and skip it if this host will not create one (Windows needs
+        # elevation or developer mode).
+        $itemTarget = Join-Path $Destination $item.Name
+        if ($item.LinkType) {
+            if ($item.LinkTarget) {
+                try {
+                    New-Item -ItemType SymbolicLink -Path $itemTarget -Value $item.LinkTarget -Force -ErrorAction Stop | Out-Null
+                } catch { }
+            }
+            continue
         }
+        # Recurse rather than handing a directory to Copy-Item -Recurse, which
+        # would dereference any link nested inside it and defeat the check above.
+        if ($item.PSIsContainer) {
+            Copy-APTree $item.FullName $itemTarget
+            continue
+        }
+        Copy-Item -LiteralPath $item.FullName -Destination $itemTarget -Force -ErrorAction Stop
     }
 }
 
@@ -338,6 +393,8 @@ function agy {
     $environment = @{}
     if ($profile) {
         $childHome = Join-Path $profile 'home'
+        New-Item -ItemType Directory -Path $childHome -Force | Out-Null
+        Add-APMacOSKeychainLink $childHome
         $environment['HOME'] = $childHome
         if (Test-APWindows) { $environment['USERPROFILE'] = $childHome }
     }
@@ -369,6 +426,7 @@ function Invoke-APGui {
         $guiDataDir = Join-Path $profile 'gui-user-data'
         New-Item -ItemType Directory -Path $childHome -Force | Out-Null
         New-Item -ItemType Directory -Path $guiDataDir -Force | Out-Null
+        Add-APMacOSKeychainLink $childHome
         $environment['HOME'] = $childHome
         if (Test-APWindows) { $environment['USERPROFILE'] = $childHome }
         # The "=" form is required: the Antigravity app is a plain Electron app whose

@@ -363,6 +363,24 @@ _ap_find_gui_command() {
     printf 'app:%s\n' "$_ap_gui_app"
 }
 
+# macOS finds the login keychain at $HOME/Library/Keychains, so a redirected HOME
+# leaves the child with no keychain at all -- Chromium then cannot store its
+# "Antigravity Safe Storage" key and macOS puts up "A keychain cannot be found to
+# store antigravity". Point the profile at the real keychain instead. That key
+# only encrypts the local cookie store at rest; the account itself lives in
+# ~/.gemini, which stays per-profile, so sharing it costs no isolation.
+_ap_link_macos_keychains() {
+    [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+    [ -d "$HOME/Library/Keychains" ] || return 0
+    # Never disturb a real directory or an existing link the user put here.
+    if [ -e "$1/Library/Keychains" ] || [ -L "$1/Library/Keychains" ]; then
+        return 0
+    fi
+    mkdir -p "$1/Library" 2>/dev/null || return 0
+    ln -s "$HOME/Library/Keychains" "$1/Library/Keychains" 2>/dev/null
+    return 0
+}
+
 _ap_launch_cli() {
     _ap_launch_provider="$1"
     _ap_launch_command="$2"
@@ -371,6 +389,8 @@ _ap_launch_cli() {
         command "$_ap_launch_command" "$@"
         return $?
     fi
+    mkdir -p "$_ap_selected_dir/home" 2>/dev/null
+    _ap_link_macos_keychains "$_ap_selected_dir/home"
     _ap_child_home=$(_ap_native_path "$_ap_selected_dir/home")
     if _ap_is_msys; then
         env HOME="$_ap_child_home" USERPROFILE="$_ap_child_home" "$_ap_launch_command" "$@"
@@ -444,6 +464,7 @@ _ap_launch_gui() {
         return $?
     fi
     mkdir -p "$_ap_selected_dir/home" "$_ap_selected_dir/gui-user-data" 2>/dev/null
+    _ap_link_macos_keychains "$_ap_selected_dir/home"
     _ap_gui_home=$(_ap_native_path "$_ap_selected_dir/home")
     _ap_gui_data_dir=$(_ap_native_path "$_ap_selected_dir/gui-user-data")
     if _ap_has_gui_data_arg "$@"; then

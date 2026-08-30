@@ -298,6 +298,31 @@ function _ap_fish_macos_gui_command
     return 1
 end
 
+# macOS finds the login keychain at $HOME/Library/Keychains, so a redirected HOME
+# leaves the child with no keychain at all -- Chromium then cannot store its
+# "Antigravity Safe Storage" key and macOS puts up "A keychain cannot be found to
+# store antigravity". Point the profile at the real keychain instead. That key
+# only encrypts the local cookie store at rest; the account itself lives in
+# ~/.gemini, which stays per-profile, so sharing it costs no isolation.
+function _ap_fish_link_macos_keychains
+    set -l child_home $argv[1]
+    if test (uname -s 2>/dev/null) != Darwin
+        return 0
+    end
+    if not test -d "$HOME/Library/Keychains"
+        return 0
+    end
+    set -l link_path (_ap_fish_join "$child_home" Library Keychains)
+    # Never disturb a real directory or an existing link the user put here.
+    if test -e "$link_path"; or test -L "$link_path"
+        return 0
+    end
+    mkdir -p (_ap_fish_join "$child_home" Library) 2>/dev/null
+    or return 0
+    ln -s "$HOME/Library/Keychains" "$link_path" 2>/dev/null
+    return 0
+end
+
 function _ap_fish_launch_cli
     set -l provider $argv[1]
     set -l launch_command $argv[2]
@@ -307,6 +332,8 @@ function _ap_fish_launch_cli
         command $launch_command $launch_args
         return $status
     end
+    mkdir -p (_ap_fish_join "$profile" home) 2>/dev/null
+    _ap_fish_link_macos_keychains (_ap_fish_join "$profile" home)
     set -l child_home (_ap_fish_native_path (_ap_fish_join "$profile" home))
     if set -q MSYSTEM[1]; and test -n "$MSYSTEM"
         env HOME="$child_home" USERPROFILE="$child_home" $launch_command $launch_args
@@ -415,6 +442,7 @@ function _ap_fish_launch_gui
         return $status
     end
     mkdir -p (_ap_fish_join "$profile" home) (_ap_fish_join "$profile" gui-user-data) 2>/dev/null
+    _ap_fish_link_macos_keychains (_ap_fish_join "$profile" home)
     set -l launch_home (_ap_fish_native_path (_ap_fish_join "$profile" home))
     if not _ap_fish_has_data_arg $launch_args
         # The "=" form is required: the app bundle is a plain Electron app whose

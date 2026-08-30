@@ -8,6 +8,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agent-profile-test.XXXXXX") || exit 1
 trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
 
+# Captured before HOME is redirected into the sandbox: the macOS keychain tests
+# need the caller's real login keychain directory, which is the thing the adapter
+# links into a profile home.
+REAL_KEYCHAINS="$HOME/Library/Keychains"
+
 HOME="$TEST_ROOT/home"
 XDG_DATA_HOME="$TEST_ROOT/data"
 PATH="$TEST_ROOT/bin:$PATH"
@@ -80,6 +85,48 @@ wait_for_log() {
 write_gui_stub() {
     printf '#!/bin/sh\nprintf "GUI_ARGS=%%s\\n" "$*" > "$AGENT_PROFILE_TEST_LOG"\nenv | grep "^HOME=" >> "$AGENT_PROFILE_TEST_LOG"\n' > "$TEST_ROOT/bin/antigravity"
     chmod +x "$TEST_ROOT/bin/antigravity"
+}
+
+# The keychain link only exists on macOS, and it needs a real login keychain
+# directory to point at, so skip cleanly elsewhere the way the app-bundle tests do.
+macos_keychain_supported() {
+    [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+    [ -d "$REAL_KEYCHAINS" ]
+}
+
+# The adapter links whatever $HOME/Library/Keychains it finds, and this suite has
+# redirected HOME into the sandbox -- so point the sandbox home's keychain
+# directory at the caller's real one. macOS resolves the login keychain through
+# both hops, which keeps the security(1) assertion honest without this test ever
+# creating or writing anything inside the real keychain directory.
+setup_sandbox_keychains() {
+    macos_keychain_supported || return 1
+    mkdir -p "$HOME/Library" || return 1
+    [ -L "$HOME/Library/Keychains" ] && return 0
+    ln -s "$REAL_KEYCHAINS" "$HOME/Library/Keychains"
+}
+
+# Symlink-resolving realpath, without depending on realpath(1) or readlink -f.
+resolved_dir() {
+    (CDPATH= cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+assert_keychain_link() {
+    _kc_link="$1/Library/Keychains"
+    if [ ! -L "$_kc_link" ]; then
+        printf 'expected %s to be a symlink into the login keychain directory\n' "$_kc_link" >&2
+        return 1
+    fi
+    if [ ! -d "$_kc_link" ]; then
+        printf 'expected %s to resolve to a directory, not dangle\n' "$_kc_link" >&2
+        return 1
+    fi
+    if [ "$(resolved_dir "$_kc_link")" != "$(resolved_dir "$REAL_KEYCHAINS")" ]; then
+        printf 'expected %s to resolve to %s, got %s\n' \
+            "$_kc_link" "$(resolved_dir "$REAL_KEYCHAINS")" "$(resolved_dir "$_kc_link")" >&2
+        return 1
+    fi
+    return 0
 }
 
 test_invalid_name_rejected() {
@@ -326,6 +373,136 @@ test_gui_restart_opens_fresh_profile_window() {
     assert_contains "$AGENT_PROFILE_TEST_LOG" "HOME=$XDG_DATA_HOME/agent-profiles/antigravity/copied/home"
 }
 
+# Redirecting HOME is what switches the Antigravity profile, and on macOS it is
+# also what loses the login keychain: the OS resolves the default keychain at
+# $HOME/Library/Keychains, so the child had none and Chromium stopped on
+# "A keychain cannot be found to store 'antigravity'". The launch has to link the
+# real keychain directory into the profile home.
+test_gui_launch_links_macos_keychain() {
+    macos_keychain_supported || return 0
+    setup_sandbox_keychains || return 1
+    write_gui_stub
+    AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND=antigravity
+    export AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    AGENT_PROFILE_TEST_LOG="$TEST_ROOT/gui-keychain.log"
+    agent-profile create antigravity keychain-gui >/dev/null 2>&1 || return 1
+    agent-profile use antigravity keychain-gui >/dev/null 2>&1 || return 1
+
+    _kc_gui_home="$XDG_DATA_HOME/agent-profiles/antigravity/keychain-gui/home"
+    # Guard the premise: the link must be the launch's doing, not create's.
+    if [ -e "$_kc_gui_home/Library/Keychains" ] || [ -L "$_kc_gui_home/Library/Keychains" ]; then
+        printf 'expected no keychain entry in %s before the launch\n' "$_kc_gui_home" >&2
+        return 1
+    fi
+
+    antigravity >/dev/null 2>&1 || return 1
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "HOME=$_kc_gui_home" || return 1
+    assert_keychain_link "$_kc_gui_home"
+}
+
+# The agy CLI redirects HOME through its own code path, so it loses the keychain
+# for the same reason and has to link it back the same way.
+test_agy_launch_links_macos_keychain() {
+    macos_keychain_supported || return 0
+    setup_sandbox_keychains || return 1
+    printf '#!/bin/sh\nenv | grep "^HOME=" > "$AGENT_PROFILE_TEST_LOG"\n' > "$TEST_ROOT/bin/agy"
+    chmod +x "$TEST_ROOT/bin/agy"
+    AGENT_PROFILE_TEST_LOG="$TEST_ROOT/agy-keychain.log"
+    agent-profile create antigravity keychain-cli >/dev/null 2>&1 || return 1
+    agent-profile use antigravity keychain-cli >/dev/null 2>&1 || return 1
+
+    _kc_cli_home="$XDG_DATA_HOME/agent-profiles/antigravity/keychain-cli/home"
+    if [ -e "$_kc_cli_home/Library/Keychains" ] || [ -L "$_kc_cli_home/Library/Keychains" ]; then
+        printf 'expected no keychain entry in %s before the launch\n' "$_kc_cli_home" >&2
+        return 1
+    fi
+
+    agy --print >/dev/null 2>&1 || return 1
+    assert_file "$AGENT_PROFILE_TEST_LOG" "HOME=$_kc_cli_home" || return 1
+    assert_keychain_link "$_kc_cli_home"
+}
+
+# Whatever the user already put at <profile>/home/Library/Keychains wins: a real
+# directory is never replaced by a link, and a link they made is never retargeted
+# -- including a dangling one, which an -e test alone would miss.
+test_launch_keeps_existing_keychain_entry() {
+    macos_keychain_supported || return 0
+    setup_sandbox_keychains || return 1
+    write_gui_stub
+    AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND=antigravity
+    export AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    AGENT_PROFILE_TEST_LOG="$TEST_ROOT/gui-keychain-keep.log"
+
+    agent-profile create antigravity keychain-keep >/dev/null 2>&1 || return 1
+    _kc_keep_home="$XDG_DATA_HOME/agent-profiles/antigravity/keychain-keep/home"
+    mkdir -p "$_kc_keep_home/Library/Keychains" || return 1
+    printf 'do-not-clobber' > "$_kc_keep_home/Library/Keychains/marker"
+    agent-profile use antigravity keychain-keep >/dev/null 2>&1 || return 1
+    antigravity >/dev/null 2>&1 || return 1
+    if [ -L "$_kc_keep_home/Library/Keychains" ]; then
+        printf 'expected the real directory at %s to survive, not become a link\n' "$_kc_keep_home/Library/Keychains" >&2
+        return 1
+    fi
+    [ -d "$_kc_keep_home/Library/Keychains" ] || return 1
+    assert_file "$_kc_keep_home/Library/Keychains/marker" 'do-not-clobber' || return 1
+
+    agent-profile create antigravity keychain-dangle >/dev/null 2>&1 || return 1
+    _kc_dangle_home="$XDG_DATA_HOME/agent-profiles/antigravity/keychain-dangle/home"
+    mkdir -p "$_kc_dangle_home/Library" || return 1
+    ln -s "$TEST_ROOT/no-such-keychain-dir" "$_kc_dangle_home/Library/Keychains" || return 1
+    agent-profile use antigravity keychain-dangle >/dev/null 2>&1 || return 1
+    antigravity >/dev/null 2>&1 || return 1
+    [ -L "$_kc_dangle_home/Library/Keychains" ] || return 1
+    [ "$(readlink "$_kc_dangle_home/Library/Keychains")" = "$TEST_ROOT/no-such-keychain-dir" ]
+}
+
+# The assertion that ties this to the reported bug. security(1) resolves the
+# default keychain exactly the way the GUI does, so run the real one: without the
+# link a redirected HOME has no default keychain at all, and with the link the
+# launch created it finds the login keychain again.
+test_macos_keychain_link_restores_default_keychain() {
+    macos_keychain_supported || return 0
+    command -v security >/dev/null 2>&1 || return 0
+    setup_sandbox_keychains || return 1
+
+    # The state the bug was reported in: a profile home with no keychain link.
+    _kc_bare_home="$TEST_ROOT/keychainless-home"
+    mkdir -p "$_kc_bare_home" || return 1
+    if _kc_bare_out=$(env HOME="$_kc_bare_home" security default-keychain 2>&1); then
+        printf 'expected security default-keychain to fail under a keychain-less HOME, got: %s\n' "$_kc_bare_out" >&2
+        return 1
+    fi
+    case "$_kc_bare_out" in
+        *'A default keychain could not be found'*) ;;
+        *)
+            printf 'expected the missing-keychain diagnostic, got: %s\n' "$_kc_bare_out" >&2
+            return 1
+            ;;
+    esac
+
+    write_gui_stub
+    AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND=antigravity
+    export AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    AGENT_PROFILE_TEST_LOG="$TEST_ROOT/gui-keychain-security.log"
+    agent-profile create antigravity keychain-security >/dev/null 2>&1 || return 1
+    agent-profile use antigravity keychain-security >/dev/null 2>&1 || return 1
+    _kc_sec_home="$XDG_DATA_HOME/agent-profiles/antigravity/keychain-security/home"
+    antigravity >/dev/null 2>&1 || return 1
+    assert_keychain_link "$_kc_sec_home" || return 1
+
+    if ! _kc_sec_out=$(env HOME="$_kc_sec_home" security default-keychain 2>&1); then
+        printf 'expected security default-keychain to succeed under the linked profile home, got: %s\n' "$_kc_sec_out" >&2
+        return 1
+    fi
+    case "$_kc_sec_out" in
+        *login.keychain*) return 0 ;;
+        *)
+            printf 'expected the login keychain to be resolved, got: %s\n' "$_kc_sec_out" >&2
+            return 1
+            ;;
+    esac
+}
+
 run_test() {
     _test_name=$1
     if "$@"; then
@@ -349,6 +526,12 @@ run_test test_gui_macos_app_bundle_open_env_launch
 run_test test_codex_wrapper_sets_codex_home
 run_test test_gui_wrapper_injects_user_data_dir
 run_test test_gui_restart_opens_fresh_profile_window
+# The keychain tests select profiles of their own and leave them selected, so
+# they run after every test that asserts on the session profile.
+run_test test_gui_launch_links_macos_keychain
+run_test test_agy_launch_links_macos_keychain
+run_test test_launch_keeps_existing_keychain_entry
+run_test test_macos_keychain_link_restores_default_keychain
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
