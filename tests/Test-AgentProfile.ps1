@@ -37,6 +37,15 @@ try {
     Assert-True ((Get-Content (Join-Path $copiedDir 'marker') -Raw).Trim() -eq 'work') 'copies from the persisted default'
     Assert-True ((agent-profile which antigravity copied) -like '*antigravity*copied') 'resolves a named profile'
 
+    $script:capturedGuiArgs = @()
+    function Invoke-APGui {
+        param([string[]]$Arguments)
+        $script:capturedGuiArgs = @($Arguments)
+        return 0
+    }
+    agent-profile restart antigravity | Out-Null
+    Assert-True ($script:capturedGuiArgs -contains '--new-window') 'restart requests a fresh GUI window'
+
     $overwriteFailed = $false
     try { agent-profile copy antigravity work copied | Out-Null } catch { $overwriteFailed = $true }
     Assert-True $overwriteFailed 'refuses overwrite without --force'

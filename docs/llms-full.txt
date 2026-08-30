@@ -71,6 +71,7 @@ agent-profile copy antigravity hafez
 agent-profile default antigravity hafez
 agy
 antigravity --new-window
+agent-profile restart antigravity
 agent-profile copy antigravity default backup
 agent-profile copy codex work
 agent-profile default codex work
@@ -82,6 +83,8 @@ directory. The CLI runs with a profile-specific child `HOME`; the GUI receives
 `--user-data-dir <profile>/gui-user-data`. Codex runs with
 `CODEX_HOME=<profile>`. Copy refuses an existing destination unless
 `--force` is provided, and OS keyring credentials are not copied or altered.
+`agent-profile restart antigravity` opens a fresh GUI window with
+`--new-window` and the selected profile without terminating other windows.
 
 ## How It Works
 

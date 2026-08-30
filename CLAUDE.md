@@ -48,6 +48,8 @@ Provider aliases `agy`, `antigravity`, `antigravity-cli`, `antigravity-gui`,
 and `antigravity-ide` normalize to the shared `antigravity` namespace; `codex`
 uses its own namespace. Target wrappers launch `agy`, Antigravity GUI, and
 Codex with the selected profile without changing the caller's environment.
+`agent-profile restart antigravity` opens a fresh GUI window with
+`--new-window` and the selected profile, without terminating existing windows.
 
 ## Directory-Local Profiles
 

@@ -24,6 +24,7 @@ if /i "%AP_COMMAND%"=="ls" goto :dispatch
 if /i "%AP_COMMAND%"=="default" goto :dispatch
 if /i "%AP_COMMAND%"=="use" goto :dispatch
 if /i "%AP_COMMAND%"=="which" goto :dispatch
+if /i "%AP_COMMAND%"=="restart" goto :dispatch
 if /i "%AP_COMMAND%"=="delete" goto :dispatch
 if /i "%AP_COMMAND%"=="status" goto :dispatch
 
@@ -43,6 +44,7 @@ if /i "%AP_COMMAND%"=="ls" goto :list
 if /i "%AP_COMMAND%"=="default" goto :default
 if /i "%AP_COMMAND%"=="use" goto :use
 if /i "%AP_COMMAND%"=="which" goto :which
+if /i "%AP_COMMAND%"=="restart" goto :restart
 if /i "%AP_COMMAND%"=="delete" goto :delete
 if /i "%AP_COMMAND%"=="status" goto :status
 echo agent-profile: unknown command '%AP_COMMAND%'. Run 'agent-profile.cmd help' for usage. >&2
@@ -146,6 +148,7 @@ echo   list ^<provider^>                            List profiles
 echo   default ^<provider^> [name]                  Get or set the default
 echo   use ^<provider^> ^<name^>                    Select a profile for this cmd session
 echo   which ^<provider^> [name]                    Print a profile directory
+echo   restart ^<provider^> [args...]               Open a fresh Antigravity GUI window
 echo   delete ^<provider^> ^<name^> [--force]       Delete a profile
 echo.
 echo Examples:
@@ -366,6 +369,20 @@ if errorlevel 1 (
 )
 echo %AP_SELECTED%
 exit /b 0
+
+:restart
+if /i not "%AP_PROVIDER%"=="antigravity" (
+    echo agent-profile: restart is only supported for antigravity >&2
+    exit /b 1
+)
+set "AP_NEW_WINDOW=--new-window"
+for %%A in (%3 %4 %5 %6 %7 %8 %9) do if /i "%%~A"=="--new-window" set "AP_NEW_WINDOW="
+if defined AP_NEW_WINDOW (
+    call "%~dp0antigravity.cmd" --new-window %3 %4 %5 %6 %7 %8 %9
+) else (
+    call "%~dp0antigravity.cmd" %3 %4 %5 %6 %7 %8 %9
+)
+exit /b %ERRORLEVEL%
 
 :status
 if not "%~3"=="" (

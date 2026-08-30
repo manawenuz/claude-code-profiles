@@ -87,6 +87,7 @@ profiles:
 | `agent-profile use antigravity <name>` | Select an Antigravity profile for this shell |
 | `agent-profile list antigravity` | List Antigravity profiles |
 | `agent-profile which antigravity [name]` | Print a profile path |
+| `agent-profile restart antigravity` | Open a fresh GUI window with the selected profile |
 | `agent-profile copy codex <name>` | Snapshot the current Codex `CODEX_HOME` |
 | `agent-profile default codex [name]` | Get or set the Codex default |
 | `agent-profile use codex <name>` | Select a Codex profile for this shell |
@@ -124,6 +125,17 @@ agent-profile default antigravity hafez
 agy                         # Antigravity CLI using hafez
 antigravity --new-window    # Antigravity GUI using hafez
 ```
+
+If the GUI is already running after switching profiles, open a fresh
+profile-isolated window with:
+
+```sh
+agent-profile restart antigravity
+```
+
+This adds `--new-window` automatically and leaves other Antigravity windows
+running, avoiding forced process termination or loss of unsaved work. You can
+pass additional GUI arguments after the provider name.
 
 `agent-profile copy antigravity default hafez` copies an existing managed
 default instead of live data. Copy refuses to overwrite an existing profile

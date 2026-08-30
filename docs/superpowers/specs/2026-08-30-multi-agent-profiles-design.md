@@ -19,6 +19,7 @@ agent-profile default antigravity hafez
 agent-profile use antigravity hafez
 agent-profile list antigravity
 agent-profile which antigravity hafez
+agent-profile restart antigravity
 ```
 
 `agy`, `antigravity`, `antigravity-ide`, and `codex` wrappers resolve the
@@ -26,7 +27,9 @@ active/default profile automatically. The target-specific manager aliases
 `agy-profile`, `antigravity-profile`, and `codex-profile` are provided for
 discoverability. `copy <provider> <name>` snapshots the current live profile
 when no source is supplied; `copy <provider> default <name>` copies the
-manager's persisted default profile.
+manager's persisted default profile. `restart antigravity` launches a fresh
+GUI window with `--new-window` and the selected profile, without terminating
+other GUI processes.
 
 ## Storage and provider adapters
 

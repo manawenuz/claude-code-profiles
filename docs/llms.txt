@@ -36,6 +36,7 @@ Each profile is a complete, isolated Claude Code configuration directory contain
 - `agent-profile copy antigravity default hafez`: copy the managed default profile
 - `agent-profile default antigravity hafez`: set the Antigravity default
 - `agent-profile use antigravity hafez`: select a profile for the current shell
+- `agent-profile restart antigravity`: open a fresh GUI window using the selected profile
 - `agent-profile copy codex work`: snapshot current Codex data
 - `agent-profile default codex work`: set the Codex default
 

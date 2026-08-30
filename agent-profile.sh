@@ -282,6 +282,13 @@ _ap_has_gui_data_arg() {
     return 1
 }
 
+_ap_has_new_window_arg() {
+    for _ap_window_arg in "$@"; do
+        [ "$_ap_window_arg" = --new-window ] && return 0
+    done
+    return 1
+}
+
 _ap_native_path() {
     if _ap_is_msys && command -v cygpath >/dev/null 2>&1; then
         cygpath -w "$1" 2>/dev/null
@@ -330,6 +337,14 @@ _ap_launch_gui() {
     fi
 }
 
+_ap_restart_gui() {
+    if _ap_has_new_window_arg "$@"; then
+        _ap_launch_gui "$@"
+    else
+        _ap_launch_gui --new-window "$@"
+    fi
+}
+
 _ap_help() {
     cat <<'HELP'
 Usage: agent-profile <provider> <command> [args...]
@@ -347,6 +362,7 @@ Commands:
   default <provider> [name]                Get or set the default
   use <provider> <name>                    Select a profile for this shell
   which <provider> [name]                  Print a profile directory
+  restart <provider> [args...]             Open a fresh Antigravity GUI window
   delete <provider> <name> [--force]       Delete a profile
 
 Aliases: agy-profile, antigravity-profile, codex-profile
@@ -370,7 +386,7 @@ agent-profile() {
             _ap_help
             return 0
             ;;
-        create|copy|list|ls|default|use|which|delete|status)
+        create|copy|list|ls|default|use|which|restart|delete|status)
             _ap_command="$1"
             shift
             _ap_provider_arg="${1:-}"
@@ -476,6 +492,10 @@ agent-profile() {
                 _ap_selected_profile "$_ap_provider_name" || { _ap_die "no active or default profile set for $_ap_provider_name"; return 1; }
                 printf '%s\n' "$_ap_selected_dir"
             fi
+            ;;
+        restart)
+            [ "$_ap_provider_name" = antigravity ] || { _ap_die "restart is only supported for antigravity"; return 1; }
+            _ap_restart_gui "$@"
             ;;
         delete)
             _ap_delete_force=0

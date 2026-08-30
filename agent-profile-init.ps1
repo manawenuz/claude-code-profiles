@@ -215,6 +215,14 @@ function Test-APGuiDataArg {
     return $false
 }
 
+function Test-APNewWindowArg {
+    param([string[]]$Arguments)
+    foreach ($argument in @($Arguments)) {
+        if ($argument -eq '--new-window') { return $true }
+    }
+    return $false
+}
+
 function Get-APHelp {
     @'
 Usage: agent-profile <provider> <command> [args...]
@@ -232,6 +240,7 @@ Commands:
   default <provider> [name]                 Get or set the default
   use <provider> <name>                     Select a profile for this shell
   which <provider> [name]                   Print a profile directory
+  restart <provider> [args...]              Open a fresh Antigravity GUI window
   delete <provider> <name> [--force]        Delete a profile
 
 Examples:
@@ -244,7 +253,7 @@ Examples:
 function agent-profile {
     $inputArgs = @($args)
     if ($inputArgs.Count -eq 0 -or $inputArgs[0] -in @('help', '-h', '--help')) { Get-APHelp; return }
-    $commands = @('create', 'copy', 'list', 'ls', 'default', 'use', 'which', 'delete', 'status')
+    $commands = @('create', 'copy', 'list', 'ls', 'default', 'use', 'which', 'restart', 'delete', 'status')
     if ($inputArgs[0] -in $commands) {
         $command = $inputArgs[0]
         if ($inputArgs.Count -lt 2) { throw 'agent-profile: missing provider' }
@@ -291,6 +300,7 @@ function agent-profile {
         'default' { if ($commandArgs.Count -eq 0) { Get-APDefaultName $provider; return }; if ($commandArgs.Count -ne 1) { throw "agent-profile: usage: agent-profile default $provider [name]" }; $path = Get-APProfilePath $provider $commandArgs[0]; if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw "agent-profile: profile '$($commandArgs[0])' does not exist" }; $root = Get-APProviderDir $provider; New-Item -ItemType Directory -Path $root -Force | Out-Null; Set-Content -LiteralPath (Join-Path $root '.default') -Value $commandArgs[0]; Write-Output "Default $provider profile set to: $($commandArgs[0])" }
         'use' { if ($commandArgs.Count -ne 1) { throw "agent-profile: usage: agent-profile use $provider <name>" }; $path = Get-APProfilePath $provider $commandArgs[0]; if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw "agent-profile: profile '$($commandArgs[0])' does not exist" }; Set-APActiveName $provider $commandArgs[0]; Write-Output "Switched to $provider profile: $($commandArgs[0])" }
         'which' { if ($commandArgs.Count -gt 1) { throw "agent-profile: usage: agent-profile which $provider [name]" }; if ($commandArgs.Count -eq 1) { $path = Get-APProfilePath $provider $commandArgs[0]; if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw "agent-profile: profile '$($commandArgs[0])' does not exist" } } else { $path = Get-APSelectedProfile $provider; if (-not $path) { throw "agent-profile: no active or default profile set for $provider" } }; Write-Output $path }
+        'restart' { if ($provider -ne 'antigravity') { throw 'agent-profile: restart is only supported for antigravity' }; Invoke-APGuiRestart $commandArgs | Out-Null }
         'delete' { $deleteForce = $commandArgs -contains '--force'; $names = @($commandArgs | Where-Object { $_ -ne '--force' }); if ($names.Count -ne 1) { throw "agent-profile: usage: agent-profile delete $provider <name> [--force]" }; $path = Get-APProfilePath $provider $names[0]; if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw "agent-profile: profile '$($names[0])' does not exist" }; if (-not $deleteForce) { $answer = Read-Host "Delete $provider profile '$($names[0])' and all its data? [y/N]"; if ($answer -notmatch '^(?i:y|yes)$') { Write-Output 'Cancelled.'; return } }; Remove-Item -LiteralPath $path -Recurse -Force; $root = Get-APProviderDir $provider; if ((Test-Path -LiteralPath (Join-Path $root '.default')) -and (Get-APDefaultName $provider) -eq $names[0]) { Remove-Item -LiteralPath (Join-Path $root '.default') -Force }; if ((Get-APActiveName $provider) -eq $names[0]) { Set-APActiveName $provider '' }; Write-Output "Deleted $provider profile: $($names[0])" }
         default { throw "agent-profile: unknown command '$command'. Run 'agent-profile help' for usage." }
     }
@@ -321,6 +331,13 @@ function Invoke-APGui {
     $finalArgs = @($Arguments)
     if ($profile -and -not (Test-APGuiDataArg $finalArgs)) { $finalArgs = @('--user-data-dir', (Join-Path $profile 'gui-user-data')) + $finalArgs }
     return (Start-APProcess (Resolve-APExecutable $command) $finalArgs @{})
+}
+
+function Invoke-APGuiRestart {
+    param([string[]]$Arguments)
+    $finalArgs = @($Arguments)
+    if (-not (Test-APNewWindowArg $finalArgs)) { $finalArgs = @('--new-window') + $finalArgs }
+    return (Invoke-APGui $finalArgs)
 }
 
 function antigravity { return (Invoke-APGui @($args)) }

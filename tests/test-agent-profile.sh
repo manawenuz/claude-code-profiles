@@ -128,6 +128,12 @@ test_gui_wrapper_injects_user_data_dir() {
     assert_contains "$AGENT_PROFILE_TEST_LOG" 'GUI_ARGS=--user-data-dir /tmp/custom-gui'
 }
 
+test_gui_restart_opens_fresh_profile_window() {
+    agent-profile restart antigravity >/dev/null 2>&1 || return 1
+    assert_contains "$AGENT_PROFILE_TEST_LOG" "--user-data-dir $XDG_DATA_HOME/agent-profiles/antigravity/copied/gui-user-data" || return 1
+    assert_contains "$AGENT_PROFILE_TEST_LOG" '--new-window'
+}
+
 run_test() {
     _test_name=$1
     if "$@"; then
@@ -143,6 +149,7 @@ run_test test_copy_from_default_and_no_overwrite
 run_test test_agy_wrapper_isolates_home
 run_test test_codex_wrapper_sets_codex_home
 run_test test_gui_wrapper_injects_user_data_dir
+run_test test_gui_restart_opens_fresh_profile_window
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
