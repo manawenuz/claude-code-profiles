@@ -89,6 +89,16 @@ function test_agent_gui_restart
     assert_file_contains "$AGENT_PROFILE_TEST_LOG" "GUI_ARGS=--user-data-dir $AGENT_PROFILE_DATA_DIR/antigravity/hafez/gui-user-data --new-window"
 end
 
+function test_agent_gui_macos_app_bundle_discovery
+    test (uname -s) = Darwin
+    or return 0
+    test -x /Applications/Antigravity.app/Contents/MacOS/Antigravity
+    or return 0
+    set -e AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    set -l discovered (_ap_fish_macos_gui_command)
+    test "$discovered" = /Applications/Antigravity.app/Contents/MacOS/Antigravity
+end
+
 function test_codex_live_copy_and_wrapper
     mkdir -p "$HOME/.codex"
     printf '%s' codex-token > "$HOME/.codex/auth.json"
@@ -173,6 +183,7 @@ function test_fish_validation_and_no_overwrite
 end
 
 run_test test_agent_live_copy_and_wrappers
+run_test test_agent_gui_macos_app_bundle_discovery
 run_test test_agent_gui_restart
 run_test test_codex_live_copy_and_wrapper
 run_test test_claude_wrapper

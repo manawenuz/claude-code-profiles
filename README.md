@@ -117,8 +117,10 @@ This means you never need to think about profiles during normal use -- just run 
 Antigravity CLI stores its settings and login files below
 `~/.gemini/antigravity-cli`; the profile wrapper launches `agy` with a
 profile-specific `HOME`. The GUI wrapper launches with
-`--user-data-dir <profile>/gui-user-data`. If the GUI executable is not named
-`antigravity` or `antigravity-ide`, set
+`--user-data-dir <profile>/gui-user-data`. It first looks for the
+`antigravity-ide` or `antigravity` command, then auto-detects the native
+`/Applications/Antigravity.app` bundle on macOS (including an installation in
+`~/Applications`). If the GUI executable is installed elsewhere, set
 `AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND` to its executable path.
 
 To copy the currently logged-in Antigravity data into `hafez`:

@@ -80,7 +80,10 @@ codex
 
 Antigravity live copies include `$HOME/.gemini` and the detected GUI user data
 directory. The CLI runs with a profile-specific child `HOME`; the GUI receives
-`--user-data-dir <profile>/gui-user-data`. Codex runs with
+`--user-data-dir <profile>/gui-user-data`. On macOS, the GUI adapter also
+auto-detects `/Applications/Antigravity.app` and
+`~/Applications/Antigravity.app` when no `antigravity` command is on `PATH`.
+Codex runs with
 `CODEX_HOME=<profile>`. Copy refuses an existing destination unless
 `--force` is provided, and OS keyring credentials are not copied or altered.
 `agent-profile restart antigravity` opens a fresh GUI window with

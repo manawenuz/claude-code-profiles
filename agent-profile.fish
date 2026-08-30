@@ -257,6 +257,22 @@ function _ap_fish_has_new_window_arg
     return 1
 end
 
+function _ap_fish_macos_gui_command
+    switch (uname -s 2>/dev/null)
+        case Darwin
+        case '*'
+            return 1
+    end
+    for app_path in /Applications/Antigravity.app "$HOME/Applications/Antigravity.app"
+        set -l app_binary "$app_path/Contents/MacOS/Antigravity"
+        if test -x "$app_binary"
+            printf '%s\n' "$app_binary"
+            return 0
+        end
+    end
+    return 1
+end
+
 function _ap_fish_launch_cli
     set -l provider $argv[1]
     set -l launch_command $argv[2]
@@ -285,6 +301,11 @@ function _ap_fish_gui_command
         return 0
     end
     set gui_path (command -s antigravity)
+    if test -n "$gui_path"
+        printf '%s\n' "$gui_path"
+        return 0
+    end
+    set gui_path (_ap_fish_macos_gui_command)
     if test -n "$gui_path"
         printf '%s\n' "$gui_path"
         return 0
