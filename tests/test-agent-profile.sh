@@ -112,6 +112,14 @@ test_gui_macos_app_bundle_discovery() {
     [ "$_ap_discovered_gui" = /Applications/Antigravity.app/Contents/MacOS/Antigravity ]
 }
 
+test_gui_macos_app_bundle_uses_new_instance_launcher() {
+    [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+    [ -x /Applications/Antigravity.app/Contents/MacOS/Antigravity ] || return 0
+    unset AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    _ap_gui_launcher=$(_ap_find_gui_command) || return 1
+    [ "$_ap_gui_launcher" = app:/Applications/Antigravity.app ]
+}
+
 test_codex_wrapper_sets_codex_home() {
     mkdir -p "$HOME/.codex"
     printf 'model = "gpt-test"\n' > "$HOME/.codex/config.toml"
@@ -156,6 +164,7 @@ run_test test_copy_live_antigravity
 run_test test_copy_from_default_and_no_overwrite
 run_test test_agy_wrapper_isolates_home
 run_test test_gui_macos_app_bundle_discovery
+run_test test_gui_macos_app_bundle_uses_new_instance_launcher
 run_test test_codex_wrapper_sets_codex_home
 run_test test_gui_wrapper_injects_user_data_dir
 run_test test_gui_restart_opens_fresh_profile_window

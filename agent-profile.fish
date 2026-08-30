@@ -257,7 +257,7 @@ function _ap_fish_has_new_window_arg
     return 1
 end
 
-function _ap_fish_macos_gui_command
+function _ap_fish_macos_gui_app
     switch (uname -s 2>/dev/null)
         case Darwin
         case '*'
@@ -266,9 +266,18 @@ function _ap_fish_macos_gui_command
     for app_path in /Applications/Antigravity.app "$HOME/Applications/Antigravity.app"
         set -l app_binary "$app_path/Contents/MacOS/Antigravity"
         if test -x "$app_binary"
-            printf '%s\n' "$app_binary"
+            printf '%s\n' "$app_path"
             return 0
         end
+    end
+    return 1
+end
+
+function _ap_fish_macos_gui_command
+    set -l app_path (_ap_fish_macos_gui_app)
+    if test -n "$app_path"
+        printf '%s/Contents/MacOS/Antigravity\n' "$app_path"
+        return 0
     end
     return 1
 end
@@ -290,7 +299,7 @@ function _ap_fish_launch_cli
     end
 end
 
-function _ap_fish_gui_command
+function _ap_fish_gui_launcher
     if set -q AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND[1]; and test -n "$AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND"
         printf '%s\n' "$AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND"
         return 0
@@ -305,28 +314,53 @@ function _ap_fish_gui_command
         printf '%s\n' "$gui_path"
         return 0
     end
-    set gui_path (_ap_fish_macos_gui_command)
-    if test -n "$gui_path"
-        printf '%s\n' "$gui_path"
+    set -l gui_app (_ap_fish_macos_gui_app)
+    if test -n "$gui_app"
+        printf 'app:%s\n' "$gui_app"
         return 0
     end
     _ap_fish_die 'could not find antigravity GUI; set AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND'
     return 127
 end
 
-function _ap_fish_launch_gui
-    set -l launch_command (_ap_fish_gui_command)
+function _ap_fish_gui_command
+    set -l gui_launcher (_ap_fish_gui_launcher)
     or return $status
+    if string match -q -- 'app:*' "$gui_launcher"
+        string replace 'app:' '' "$gui_launcher" | string append /Contents/MacOS/Antigravity
+    else
+        printf '%s\n' "$gui_launcher"
+    end
+end
+
+function _ap_fish_launch_gui
+    set -l gui_launcher (_ap_fish_gui_launcher)
+    or return $status
+    set -l launch_mode command
+    set -l launch_command "$gui_launcher"
+    set -l launch_app
+    if string match -q -- 'app:*' "$gui_launcher"
+        set launch_mode app
+        set launch_app (string replace 'app:' '' "$gui_launcher")
+    end
     set -l launch_args $argv
     set -l profile (_ap_fish_selected_profile antigravity 2>/dev/null)
     if test $status -ne 0
-        command $launch_command $launch_args
+        if test "$launch_mode" = app
+            command /usr/bin/open -n -a "$launch_app" --args $launch_args
+        else
+            command $launch_command $launch_args
+        end
         return $status
     end
     if not _ap_fish_has_data_arg $launch_args
         set launch_args --user-data-dir (_ap_fish_native_path (_ap_fish_join "$profile" gui-user-data)) $launch_args
     end
-    command $launch_command $launch_args
+    if test "$launch_mode" = app
+        command /usr/bin/open -n -a "$launch_app" --args $launch_args
+    else
+        command $launch_command $launch_args
+    end
 end
 
 function _ap_fish_restart_gui

@@ -99,6 +99,16 @@ function test_agent_gui_macos_app_bundle_discovery
     test "$discovered" = /Applications/Antigravity.app/Contents/MacOS/Antigravity
 end
 
+function test_agent_gui_macos_app_bundle_uses_new_instance_launcher
+    test (uname -s) = Darwin
+    or return 0
+    test -x /Applications/Antigravity.app/Contents/MacOS/Antigravity
+    or return 0
+    set -e AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND
+    set -l discovered (_ap_fish_gui_launcher)
+    test "$discovered" = app:/Applications/Antigravity.app
+end
+
 function test_codex_live_copy_and_wrapper
     mkdir -p "$HOME/.codex"
     printf '%s' codex-token > "$HOME/.codex/auth.json"
@@ -184,6 +194,7 @@ end
 
 run_test test_agent_live_copy_and_wrappers
 run_test test_agent_gui_macos_app_bundle_discovery
+run_test test_agent_gui_macos_app_bundle_uses_new_instance_launcher
 run_test test_agent_gui_restart
 run_test test_codex_live_copy_and_wrapper
 run_test test_claude_wrapper

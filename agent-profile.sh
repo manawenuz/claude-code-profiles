@@ -297,17 +297,38 @@ _ap_native_path() {
     fi
 }
 
-_ap_macos_gui_command() {
+_ap_macos_gui_app() {
     [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
     for _ap_gui_app in \
         "/Applications/Antigravity.app" \
         "${HOME}/Applications/Antigravity.app"; do
         _ap_gui_app_binary="${_ap_gui_app}/Contents/MacOS/Antigravity"
         if [ -x "$_ap_gui_app_binary" ]; then
-            printf '%s\n' "$_ap_gui_app_binary"
+            printf '%s\n' "$_ap_gui_app"
             return 0
         fi
     done
+    return 1
+}
+
+_ap_macos_gui_command() {
+    _ap_gui_app=$(_ap_macos_gui_app) || return 1
+    printf '%s/Contents/MacOS/Antigravity\n' "$_ap_gui_app"
+}
+
+_ap_find_path_command() {
+    _ap_find_name=$1
+    _ap_find_old_ifs=$IFS
+    IFS=:
+    for _ap_find_dir in ${PATH:-}; do
+        [ -n "$_ap_find_dir" ] || _ap_find_dir=.
+        if [ -f "$_ap_find_dir/$_ap_find_name" ] && [ -x "$_ap_find_dir/$_ap_find_name" ]; then
+            IFS=$_ap_find_old_ifs
+            printf '%s\n' "$_ap_find_name"
+            return 0
+        fi
+    done
+    IFS=$_ap_find_old_ifs
     return 1
 }
 
@@ -317,15 +338,16 @@ _ap_find_gui_command() {
         printf '%s\n' "$_ap_gui_command"
         return 0
     fi
-    if command -v antigravity-ide >/dev/null 2>&1; then
+    if _ap_find_path_command antigravity-ide >/dev/null 2>&1; then
         printf '%s\n' antigravity-ide
         return 0
     fi
-    if command -v antigravity >/dev/null 2>&1; then
+    if _ap_find_path_command antigravity >/dev/null 2>&1; then
         printf '%s\n' antigravity
         return 0
     fi
-    _ap_macos_gui_command
+    _ap_gui_app=$(_ap_macos_gui_app) || return 1
+    printf 'app:%s\n' "$_ap_gui_app"
 }
 
 _ap_launch_cli() {
@@ -345,20 +367,42 @@ _ap_launch_cli() {
 }
 
 _ap_launch_gui() {
-    _ap_gui_command=$(_ap_find_gui_command)
-    if [ -z "$_ap_gui_command" ]; then
+    _ap_gui_launcher=$(_ap_find_gui_command)
+    if [ -z "$_ap_gui_launcher" ]; then
         _ap_die "could not find antigravity GUI; set AGENT_PROFILE_ANTIGRAVITY_GUI_COMMAND"
         return 127
     fi
+    _ap_gui_mode=command
+    case "$_ap_gui_launcher" in
+        app:*)
+            _ap_gui_mode=app
+            _ap_gui_app=${_ap_gui_launcher#app:}
+            ;;
+        *)
+            _ap_gui_command=$_ap_gui_launcher
+            ;;
+    esac
     if ! _ap_selected_profile antigravity; then
-        command "$_ap_gui_command" "$@"
+        if [ "$_ap_gui_mode" = app ]; then
+            command /usr/bin/open -n -a "$_ap_gui_app" --args "$@"
+        else
+            command "$_ap_gui_command" "$@"
+        fi
         return $?
     fi
     _ap_gui_data_dir=$(_ap_native_path "$_ap_selected_dir/gui-user-data")
     if _ap_has_gui_data_arg "$@"; then
-        command "$_ap_gui_command" "$@"
+        if [ "$_ap_gui_mode" = app ]; then
+            command /usr/bin/open -n -a "$_ap_gui_app" --args "$@"
+        else
+            command "$_ap_gui_command" "$@"
+        fi
     else
-        command "$_ap_gui_command" --user-data-dir "$_ap_gui_data_dir" "$@"
+        if [ "$_ap_gui_mode" = app ]; then
+            command /usr/bin/open -n -a "$_ap_gui_app" --args --user-data-dir "$_ap_gui_data_dir" "$@"
+        else
+            command "$_ap_gui_command" --user-data-dir "$_ap_gui_data_dir" "$@"
+        fi
     fi
 }
 

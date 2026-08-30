@@ -140,8 +140,10 @@ agent-profile restart antigravity
 ```
 
 This adds `--new-window` automatically and leaves other Antigravity windows
-running, avoiding forced process termination or loss of unsaved work. You can
-pass additional GUI arguments after the provider name.
+running, avoiding forced process termination or loss of unsaved work. When the
+GUI is auto-detected from a macOS app bundle, the adapter also uses `open -n`
+so the new profile cannot attach to an already-running Antigravity instance.
+You can pass additional GUI arguments after the provider name.
 
 `agent-profile copy antigravity default hafez` copies an existing managed
 default instead of live data. Copy refuses to overwrite an existing profile
